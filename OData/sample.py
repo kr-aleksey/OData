@@ -4,6 +4,7 @@ from OData.odata import OData
 
 
 class FooSerializer(BaseModel):
+    pass
     uid_1c: str = Field(validation_alias='Ref_Key',
                         max_length=36)
     name: str = Field(validation_alias='Description',
@@ -16,5 +17,5 @@ class FooSerializer(BaseModel):
 class FooOdata(OData):
     serializer_class = FooSerializer
 
-odata = FooOdata().filter(width__gt=50, length=500)
+odata = FooOdata().filter(uid_1c__eq__guid='123-456')
 print(odata.build_query_params())
