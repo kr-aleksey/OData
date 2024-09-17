@@ -1,14 +1,13 @@
-from typing import Any, Type
+from typing import Any, Callable, Type
 
 from pydantic import BaseModel, Field
 
 
 class Lookup:
     """Parses lookup."""
-
-    def __new__(cls, *args, **kwargs):
-        raise NotImplementedError(
-            f'Class {cls.__name__} cannot be instantiated.')
+    LOOKUPS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
+    DEFAULT_LOOKUP = 'eq'
+    NOTATIONS = ('guid', 'date')
 
     @classmethod
     def build(cls,
@@ -24,29 +23,24 @@ class Lookup:
         :param notation: Value notation. 'guid' only.
         :return: Odata filter parameter.
         """
+        field_alias: str = field.validation_alias
+        notation_func = cls.get_notation_func(notation)
+        return cls.get_lookup_builder(lookup)(
+            field_alias, value, notation_func)
+
+    """Lookups."""
+
+    @classmethod
+    def get_lookup_builder(cls, lookup: str | None) -> Callable:
         if lookup is None:
             lookup = cls.DEFAULT_LOOKUP
         elif lookup not in cls.LOOKUPS:
             raise TypeError(
                 f"Unsupported lookup {lookup}. Use one of {cls.LOOKUPS}.")
-        field_alias: str = field.validation_alias
-        if notation is not None:
-            notation_func = cls.NOTATIONS.get(notation)
-            if notation_func is None:
-                raise TypeError(
-                    f"Unsupported notation {notation}. "
-                    f"Use one of {list(cls.NOTATIONS.keys())}."
-                )
-        else:
-            notation_func = None
-        builder = cls.LOOKUP_BUILDER.get(lookup)
-        if builder is None:
-            if notation_func is not None:
-                value = notation_func(value)
-            return f'{field_alias} {lookup} {value}'
-        return builder(field_alias, value, notation_func)
-
-    """Lookups."""
+        if lookup == 'in':
+            return cls.in_builder
+        return lambda field_alias, value, notation_func: \
+            f'{field_alias} {lookup} {notation_func(value)}'
 
     @staticmethod
     def in_builder(field_alias: str,
@@ -67,22 +61,15 @@ class Lookup:
 
     """Notations."""
 
-    @staticmethod
-    def guid_notation(value) -> str:
-        """
-        :param value: Value.
-        :return: The guid notation of value
-        """
-        return f"guid'{value}'"
-
-    LOOKUPS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
-    DEFAULT_LOOKUP = 'eq'
-    LOOKUP_BUILDER = {
-        'in': in_builder
-    }
-    NOTATIONS = {
-        'guid': guid_notation
-    }
+    @classmethod
+    def get_notation_func(cls, notation: str | None) -> Callable[[Any], str]:
+        if notation is None:
+            return lambda value: str(value)
+        if notation not in cls.NOTATIONS:
+            raise TypeError(
+                f"Unsupported notation {notation}. Use one of {cls.NOTATIONS}."
+            )
+        return lambda value: f"{notation}'{value}'"
 
 
 class OData:
@@ -148,7 +135,8 @@ class OData:
 
     def build_query_params(self) -> str:
         query_params = [p for p
-                        in (self.build_select(), self.build_filter()) if p]
+                        in (self.build_select(), self.build_filter())
+                        if p]
         if not query_params:
             return ''
         return f'?{'&'.join(query_params)}'
