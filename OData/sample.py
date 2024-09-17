@@ -1,7 +1,6 @@
-from pydantic import BaseModel, Field
-
 from OData.odata import OData
 
+from pydantic import BaseModel, Field
 
 class FooSerializer(BaseModel):
     pass
