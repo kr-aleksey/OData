@@ -16,5 +16,5 @@ class FooSerializer(BaseModel):
 class FooOdata(OData):
     serializer_class = FooSerializer
 
-odata = FooOdata().filter(uid_1c__in__guid=['123-456', '789-874'])
+odata = FooOdata().filter(uid_1c__in__guid=['123-456', '789-874'], width__gt=200)
 print(odata.build_query_params())
