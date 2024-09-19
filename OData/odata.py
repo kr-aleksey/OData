@@ -1,6 +1,53 @@
-from typing import Any, Callable, Type
+from typing import Any, Callable, Optional, Type
 
 from pydantic import BaseModel, Field
+
+
+class Q:
+    """
+    Encapsulates filters as objects that can be logically
+    combined using `&` and `|`.
+    """
+    AND: str = "AND"
+    OR: str = "OR"
+
+    left: Optional['Q'] = None
+    right: Optional['Q'] = None
+    connector: str | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs: dict[str, Any] = kwargs
+
+    def __or__(self, other: 'Q') -> 'Q':
+        return self._create(left=self, right=other, connector=self.OR)
+
+    def __and__(self, other: 'Q') -> 'Q':
+        return self._create(left=self, right=other, connector=self.AND)
+
+    def __str__(self) -> str:
+        def build(q: 'Q') -> tuple[str, str]:
+            if q.connector is None:
+                return (f' {self.AND} '.join(
+                            f'{k}={v}' for k, v in q.kwargs.items()),
+                        self.AND)
+            left, left_connector = build(q.left)
+            right, right_connector = build(q.right)
+            if q.connector == self.AND:
+                if left_connector == self.OR:
+                    left = f'({left})'
+                if right_connector == self.OR:
+                    right = f'({right})'
+            return f'{left} {q.connector} {right}', q.connector
+        return build(self)[0]
+
+    @classmethod
+    def _create(cls, left: 'Q' , right: 'Q', connector: str) -> 'Q':
+        q = cls()
+        q.left = left
+        q.right = right
+        q.connector = connector
+        return q
 
 
 class OData:
@@ -8,7 +55,7 @@ class OData:
 
     LOOKUPS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
     DEFAULT_LOOKUP = 'eq'
-    NOTATIONS = ('guid', 'date')
+    ANNOTATIONS = ('guid', 'date')
 
     def __new__(cls, *args, **kwargs):
         assert hasattr(cls, 'serializer_class'), \
@@ -28,7 +75,7 @@ class OData:
         self.serializer_class.
         Параметры фильтрации объединяются пока только по and.
         Пример:
-            filter(foo='Строка' , bar__gt=20, uid_1c__in__guid = ['',])
+            filter(Q(baz='a'), foo='b' , bar__gt=20, uid__in__guid = ['',])
         """
         for key, value in kwargs.items():
             field_lookup: list[str | None] = key.split('__', maxsplit=3)
@@ -36,18 +83,22 @@ class OData:
                 field_lookup.extend([self.DEFAULT_LOOKUP, None])
             elif len(field_lookup) == 2:
                 field_lookup.append(None)
-            field, lookup, notation = field_lookup
+            field, lookup, annotation = field_lookup
 
             if field not in self.fields:
                 raise KeyError(
                     f"Field '{field_lookup[0]}' not found. "
                     f"Use one of {list(self.fields.keys())}"
                 )
-            self._filters.append((field, lookup, value, notation))
+            self._filters.append((field, lookup, value, annotation))
 
             if lookup not in self.LOOKUPS:
                 raise TypeError(
                     f"Unsupported lookup {lookup}. Use one of {self.LOOKUPS}.")
+
+            if annotation is not None and annotation not in self.ANNOTATIONS:
+                raise TypeError(f"Unsupported annotation {annotation}."
+                                f" Use one of {self.ANNOTATIONS}.")
         return self
 
     def build_query_params(self) -> str:
@@ -70,44 +121,46 @@ class OData:
     def build_filter(self) -> str:
         """Generates the "$filter" query parameter."""
         conditions = []
-        for field, lookup, value, notation in self._filters:
+        for field, lookup, value, annotation in self._filters:
             lookup_builder = self.get_lookup_builder(lookup)
-            notation_func = self.get_notation_func(notation)
-            alias = self.fields[field].validation_alias
-
-            conditions.append(lookup_builder(alias, value, notation_func))
+            conditions.append(lookup_builder(field, value, annotation))
         if not conditions:
             return ''
         return '$filter=' + ' and '.join(conditions)
+
+    def annotate_value(self,
+                       field: str,
+                       value: Any,
+                       annotation: str | None) -> str:
+        if annotation is not None:
+            return f"{annotation}'{value}'"
+
+        field_type = self.fields[field].annotation
+        if field_type is str:
+            return f"'{value}'"
+        return str(value)
 
     """Lookups."""
 
     def get_lookup_builder(self, lookup: str) -> Callable:
         if lookup == 'in':
             return self.in_builder
-        return lambda field_alias, value, notation_func: \
-            f'{field_alias} {lookup} {notation_func(value)}'
+        return lambda field, value, annotation: \
+            (f'{self.fields[field].validation_alias} {lookup} '
+             f'{self.annotate_value(field, value, annotation)}')
 
-    @staticmethod
-    def in_builder(field_alias: str,
+    def in_builder(self,
+                   field: str,
                    value: Any,
-                   notation: callable) -> str:
+                   annotation: str | None) -> str:
         """
-        :param field_alias: Field validation_alias.
+        :param field: Field name.
         :param value: Value.
-        :param notation: Notation func.
+        :param annotation: Annotation.
         Converts lookup 'in' to an Odata filter parameter.
         For example: 'foo eq value or foo_alias eq value2 ...'
         """
-        items = [f'{field_alias} eq {notation(v)}' for v in value]
+        alias = self.fields[field].validation_alias
+        items = [f'{alias} eq {self.annotate_value(field, v, annotation)}'
+                 for v in value]
         return ' or '.join(items)
-
-    """Notations."""
-
-    def get_notation_func(self, notation: str | None) -> Callable[[Any], str]:
-        if notation is None:
-            return lambda value: str(value)
-        if notation not in self.NOTATIONS:
-            raise TypeError(f"Unsupported notation {notation}."
-                            f" Use one of {self.NOTATIONS}.")
-        return lambda value: f"{notation}'{value}'"

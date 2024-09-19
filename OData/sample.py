@@ -1,4 +1,4 @@
-from OData.odata import OData
+from OData.odata import OData, Q
 
 from pydantic import BaseModel, Field
 
@@ -16,5 +16,10 @@ class FooSerializer(BaseModel):
 class FooOdata(OData):
     serializer_class = FooSerializer
 
-odata = FooOdata().filter(uid_1c__in__guid=['123-456', '789-874'], width__gt=200)
-print(odata.build_query_params())
+# odata = FooOdata().filter(uid_1c__in__guid=['123-456', '789-874'], width__gt=200, name='Foo')
+# print(odata.build_query_params())
+
+q = Q(Q(w=1), b='abc', a=123)
+q2 = (Q(a=10, b='abc') | Q(c=50)) & Q(d__in=[50, 55])
+print(q)
+print(q2)
