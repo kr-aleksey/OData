@@ -1,53 +1,129 @@
-from typing import Any, Callable, Optional, Type
+from typing import Any, Callable, Type
 
 from pydantic import BaseModel, Field
 
 
+# class Q:
+#     """
+#     Encapsulates filters as objects that can be logically
+#     combined using `&` and `|`.
+#     """
+#     AND: str = "AND"
+#     OR: str = "OR"
+#
+#     left: Optional['Q'] = None
+#     right: Optional['Q'] = None
+#     connector: str | None = None
+#
+#     def __init__(self, *args, **kwargs) -> None:
+#         self.args = args
+#         self.kwargs: dict[str, Any] = kwargs
+#
+#     def __or__(self, other: 'Q') -> 'Q':
+#         return self._create(left=self, right=other, connector=self.OR)
+#
+#     def __and__(self, other: 'Q') -> 'Q':
+#         return self._create(left=self, right=other, connector=self.AND)
+#
+#     def __str__(self) -> str:
+#         def build(q: 'Q') -> tuple[str, str]:
+#             if q.connector is None:
+#                 return (f' {self.AND} '.join(
+#                             f'{k}={v}' for k, v in q.kwargs.items()),
+#                         self.AND)
+#             left, left_connector = build(q.left)
+#             right, right_connector = build(q.right)
+#             if q.connector == self.AND:
+#                 if left_connector == self.OR:
+#                     left = f'({left})'
+#                 if right_connector == self.OR:
+#                     right = f'({right})'
+#             return f'{left} {q.connector} {right}', q.connector
+#         return build(self)[0]
+#
+#     @classmethod
+#     def _create(cls, left: 'Q' , right: 'Q', connector: str) -> 'Q':
+#         q = cls()
+#         q.left = left
+#         q.right = right
+#         q.connector = connector
+#         return q
+
 class Q:
-    """
-    Encapsulates filters as objects that can be logically
-    combined using `&` and `|`.
-    """
-    AND: str = "AND"
-    OR: str = "OR"
+    AND = 'and'
+    OR = 'or'
+    NOT = 'not'
 
-    left: Optional['Q'] = None
-    right: Optional['Q'] = None
-    connector: str | None = None
-
-    def __init__(self, *args, **kwargs) -> None:
-        self.args = args
-        self.kwargs: dict[str, Any] = kwargs
-
-    def __or__(self, other: 'Q') -> 'Q':
-        return self._create(left=self, right=other, connector=self.OR)
-
-    def __and__(self, other: 'Q') -> 'Q':
-        return self._create(left=self, right=other, connector=self.AND)
-
-    def __str__(self) -> str:
-        def build(q: 'Q') -> tuple[str, str]:
-            if q.connector is None:
-                return (f' {self.AND} '.join(
-                            f'{k}={v}' for k, v in q.kwargs.items()),
-                        self.AND)
-            left, left_connector = build(q.left)
-            right, right_connector = build(q.right)
-            if q.connector == self.AND:
-                if left_connector == self.OR:
-                    left = f'({left})'
-                if right_connector == self.OR:
-                    right = f'({right})'
-            return f'{left} {q.connector} {right}', q.connector
-        return build(self)[0]
+    def __init__(self, **kwargs):
+        if not kwargs:
+            raise AttributeError('No arguments given')
+        self.children = [*kwargs.items()]
+        self.connector = self.AND
+        self.negated = False
 
     @classmethod
-    def _create(cls, left: 'Q' , right: 'Q', connector: str) -> 'Q':
-        q = cls()
-        q.left = left
-        q.right = right
-        q.connector = connector
-        return q
+    def create(cls, children=None, connector=None, negated=False):
+        obj = cls.__new__(cls)
+        obj.children = children.copy() if children else []
+        obj.connector = connector if connector is not None else connector
+        obj.negated = negated
+        return obj
+
+    def __str__(self) -> str:
+        child_strs = []
+        for child in self.children:
+            if self.connector == Q.AND and isinstance(child, Q) and not child.negated:
+                child_strs.append(f'({child})')
+            else:
+                child_strs.append(f'{child}')
+        result = f' {self.connector} '.join(child_strs)
+        if self.negated:
+            return f'{self.NOT} ({result})'
+        return result
+
+
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}: {self}'
+
+    def __copy__(self):
+        return self.create(children=self.children,
+                           connector=self.connector,
+                           negated=self.negated)
+
+    copy = __copy__
+
+    def __or__(self, other):
+        return self.combine(other=other, connector=self.OR)
+
+    def __and__(self, other):
+        return self.combine(other=other, connector=self.AND)
+
+    def __invert__(self):
+        obj = self.copy()
+        obj.negated = not self.negated
+        return obj
+
+    def add(self, other) -> None:
+        # if self.connector != connector:
+        #     self.connector = connector
+        #     self.children = [self.copy(), other]
+        # elif (not other.negated
+        #       and (other.connector == connector or len(other.children) == 1)):
+        #     self.children.extend(other.children)
+        if not other.negated and (self.connector == other.connector or len(other.children) == 1):
+            self.children.extend(other.children)
+        else:
+            self.children.append(other)
+
+    def combine(self, other, connector):
+        if not self.children:
+            return other.copy()
+
+        obj = self.create(connector=connector)
+        obj.add(self)
+        obj.add(other)
+        return obj
 
 
 class OData:
