@@ -54,12 +54,25 @@ class Q:
     OR = 'or'
     NOT = 'not'
 
-    def __init__(self, **kwargs):
-        if not kwargs:
+    def __new__(cls, *args, **kwargs):
+        """
+        Creates a Q object with kwargs parameters. Combines
+        the created Q object with the objects passed through
+        positional arguments. Returns the resulting Q object.
+        :param args: Q objects.
+        :param kwargs: Lookups.
+        """
+        obj = super().__new__(cls)
+        obj.children = [*kwargs.items()]
+        obj.connector = Q.AND
+        obj.negated = False
+        for parent in args:
+            obj = obj & parent
+        return obj
+
+    def __init__(self, *args, **kwargs):
+        if not args and not kwargs:
             raise AttributeError('No arguments given')
-        self.children = [*kwargs.items()]
-        self.connector = self.AND
-        self.negated = False
 
     @classmethod
     def create(cls, children=None, connector=None, negated=False):
@@ -72,7 +85,8 @@ class Q:
     def __str__(self) -> str:
         child_strs = []
         for child in self.children:
-            if self.connector == Q.AND and isinstance(child, Q) and not child.negated:
+            if self.connector == Q.AND and isinstance(child,
+                                                      Q) and not child.negated:
                 child_strs.append(f'({child})')
             else:
                 child_strs.append(f'{child}')
@@ -80,8 +94,6 @@ class Q:
         if self.negated:
             return f'{self.NOT} ({result})'
         return result
-
-
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}: {self}'
@@ -111,7 +123,8 @@ class Q:
         # elif (not other.negated
         #       and (other.connector == connector or len(other.children) == 1)):
         #     self.children.extend(other.children)
-        if not other.negated and (self.connector == other.connector or len(other.children) == 1):
+        if not other.negated and (
+                self.connector == other.connector or len(other.children) == 1):
             self.children.extend(other.children)
         else:
             self.children.append(other)
