@@ -50,25 +50,48 @@ from pydantic import BaseModel, Field
 #         return q
 
 class Q:
+    """
+    Q is a node of a tree graph.
+    A single internal node in the tree graph. A node should be
+    thought of as a connection (root) whose children are either
+    leaf nodes or other instances of the node.
+    """
+
     AND = 'and'
     OR = 'or'
     NOT = 'not'
 
+    arg_error_msg = 'The positional argument must be a Q object. Received {}.'
+
     def __new__(cls, *args, **kwargs):
         """
-        Creates a Q object with kwargs parameters. Combines
-        the created Q object with the objects passed through
-        positional arguments. Returns the resulting Q object.
+        Creates a Q object with kwargs leaf. Combines the created
+        Q object with the objects passed via positional arguments
+        using &. Returns the resulting Q object.
+        q = Q(Q(a=1) | Q(b=0) , Q(c=1) , e=2) equivalent
+        q2 = Q(e=2) & (Q(a=1) | Q(b=0)) & Q(c=1)
         :param args: Q objects.
         :param kwargs: Lookups.
         """
+        if args:
+            cls.check_args_type(args)
+            child = args[0]
+            for arg in args[1:]:
+                child &= arg
+
         obj = super().__new__(cls)
         obj.children = [*kwargs.items()]
         obj.connector = Q.AND
         obj.negated = False
-        for parent in args:
-            obj = obj & parent
+        for child in args:
+            obj &= child
         return obj
+
+    @classmethod
+    def check_args_type(cls, args: tuple) -> None:
+        for arg in args:
+            if not isinstance(arg, Q):
+                raise TypeError(cls.arg_error_msg.format(type(arg)))
 
     def __init__(self, *args, **kwargs):
         if not args and not kwargs:
@@ -85,8 +108,9 @@ class Q:
     def __str__(self) -> str:
         child_strs = []
         for child in self.children:
-            if self.connector == Q.AND and isinstance(child,
-                                                      Q) and not child.negated:
+            if (self.connector == Q.AND
+                    and isinstance(child, Q)
+                    and not child.negated):
                 child_strs.append(f'({child})')
             else:
                 child_strs.append(f'{child}')
@@ -96,7 +120,8 @@ class Q:
         return result
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}: {self}'
+        return f'<{self.__class__.__name__}: {self}>'
+
 
     def __copy__(self):
         return self.create(children=self.children,
