@@ -1,61 +1,13 @@
 from typing import Any, Callable, Type
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-
-# class Q:
-#     """
-#     Encapsulates filters as objects that can be logically
-#     combined using `&` and `|`.
-#     """
-#     AND: str = "AND"
-#     OR: str = "OR"
-#
-#     left: Optional['Q'] = None
-#     right: Optional['Q'] = None
-#     connector: str | None = None
-#
-#     def __init__(self, *args, **kwargs) -> None:
-#         self.args = args
-#         self.kwargs: dict[str, Any] = kwargs
-#
-#     def __or__(self, other: 'Q') -> 'Q':
-#         return self._create(left=self, right=other, connector=self.OR)
-#
-#     def __and__(self, other: 'Q') -> 'Q':
-#         return self._create(left=self, right=other, connector=self.AND)
-#
-#     def __str__(self) -> str:
-#         def build(q: 'Q') -> tuple[str, str]:
-#             if q.connector is None:
-#                 return (f' {self.AND} '.join(
-#                             f'{k}={v}' for k, v in q.kwargs.items()),
-#                         self.AND)
-#             left, left_connector = build(q.left)
-#             right, right_connector = build(q.right)
-#             if q.connector == self.AND:
-#                 if left_connector == self.OR:
-#                     left = f'({left})'
-#                 if right_connector == self.OR:
-#                     right = f'({right})'
-#             return f'{left} {q.connector} {right}', q.connector
-#         return build(self)[0]
-#
-#     @classmethod
-#     def _create(cls, left: 'Q' , right: 'Q', connector: str) -> 'Q':
-#         q = cls()
-#         q.left = left
-#         q.right = right
-#         q.connector = connector
-#         return q
 
 class Q:
     """
-    Q is a node of a tree graph.
-    A single internal node in the tree graph. A node should be
-    thought of as a connection (root) whose children are either
-    leaf nodes or other instances of the node.
-    Powered by Django. This code is partially based on Django code.
+    Q is a node of a tree graph. A node is a connection whose child
+    nodes are either leaf nodes or other instances of the node.
+    This code is partially based on Django code.
     """
 
     AND = 'and'
@@ -142,14 +94,15 @@ class Q:
         obj.negated = not self.negated
         return obj
 
-    # def __iter__(self):
-    #     children
-    #     for child in self.children:
-    #         if isinstance(child, Q):
-    #             for sub_child in child:
-    #                 yield sub_child
-    #         else:
-    #             yield self.negated, self.connector, child
+    def __iter__(self):
+        children = []
+        for child in self.children:
+            if isinstance(child, Q):
+                yield from child
+            else:
+                children.append(child)
+        yield self.NOT if self.negated else '', self.connector, children
+
 
     def add(self, other) -> None:
         if not other.negated and (
@@ -166,17 +119,6 @@ class Q:
         obj.add(self)
         obj.add(other)
         return obj
-
-    def flatten(self):
-        children = []
-        for child in self.children:
-            if isinstance(child, Q):
-                x = child.flatten()
-                for y in x:
-                    yield y
-            else:
-                children.append(child)
-        yield self.NOT if self.negated else '', self.connector, children
 
 
 class OData:
@@ -208,31 +150,6 @@ class OData:
         self._filter = Q(*args, **kwargs)
         return self
 
-
-        # for key, value in kwargs.items():
-        #     field_lookup: list[str | None] = key.split('__', maxsplit=3)
-        #     if len(field_lookup) == 1:
-        #         field_lookup.extend([self.DEFAULT_LOOKUP, None])
-        #     elif len(field_lookup) == 2:
-        #         field_lookup.append(None)
-        #     field, lookup, annotation = field_lookup
-        #
-        #     if field not in self.fields:
-        #         raise KeyError(
-        #             f"Field '{field_lookup[0]}' not found. "
-        #             f"Use one of {list(self.fields.keys())}"
-        #         )
-        #     self._filters.append((field, lookup, value, annotation))
-        #
-        #     if lookup not in self.LOOKUPS:
-        #         raise TypeError(
-        #             f"Unsupported lookup {lookup}. Use one of {self.LOOKUPS}.")
-        #
-        #     if annotation is not None and annotation not in self.ANNOTATIONS:
-        #         raise TypeError(f"Unsupported annotation {annotation}."
-        #                         f" Use one of {self.ANNOTATIONS}.")
-        # return self
-
     def build_query_params(self) -> str:
         query_params = [p for p
                         in (self.build_select(), self.build_filter())
@@ -257,24 +174,27 @@ class OData:
         result = ''
         children = []
         prev_conn = None
-        for negated, connector, lookups in self._filter.flatten():
+        connector = Q.AND
+        for negated, connector, lookups in self._filter:
             conditions = []
             for lookup in lookups:
                 conditions.append(self.build_lookup(lookup))
-
-            if children and connector != prev_conn:
+            if conditions:
+                condition = f' {connector} '.join(conditions)
+                if negated:
+                    condition = f'{negated} ({condition})'
+                children.append(condition)
+            if prev_conn is not None and connector != prev_conn:
                 if connector == Q.AND:
                     children = list(map(lambda x: f'({x})', children))
                 result += f' {connector} '.join(children)
-
                 children = []
+                prev_conn = None
             else:
-                children.append(f' {connector} '.join(conditions))
-            prev_conn = connector
-
-        if not result:
-            return ''
-        return '$filter=' + result
+                prev_conn = connector
+        if children:
+            result += f' {connector} '.join(children)
+        return result
 
     def annotate_value(self,
                        field: str,
@@ -329,7 +249,6 @@ class OData:
         Converts lookup 'in' to an Odata filter parameter.
         For example: 'foo eq value or foo_alias eq value2 ...'
         """
-        alias = self.fields[field].validation_alias
-        items = [f'{alias} eq {self.annotate_value(field, v, annotation)}'
+        items = [f'{field} eq {self.annotate_value(field, v, annotation)}'
                  for v in value]
         return ' or '.join(items)
