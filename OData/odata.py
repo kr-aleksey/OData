@@ -55,6 +55,7 @@ class Q:
     A single internal node in the tree graph. A node should be
     thought of as a connection (root) whose children are either
     leaf nodes or other instances of the node.
+    Powered by Django. This code is partially based on Django code.
     """
 
     AND = 'and'
@@ -141,13 +142,16 @@ class Q:
         obj.negated = not self.negated
         return obj
 
+    # def __iter__(self):
+    #     children
+    #     for child in self.children:
+    #         if isinstance(child, Q):
+    #             for sub_child in child:
+    #                 yield sub_child
+    #         else:
+    #             yield self.negated, self.connector, child
+
     def add(self, other) -> None:
-        # if self.connector != connector:
-        #     self.connector = connector
-        #     self.children = [self.copy(), other]
-        # elif (not other.negated
-        #       and (other.connector == connector or len(other.children) == 1)):
-        #     self.children.extend(other.children)
         if not other.negated and (
                 self.connector == other.connector or len(other.children) == 1):
             self.children.extend(other.children)
@@ -163,12 +167,23 @@ class Q:
         obj.add(other)
         return obj
 
+    def flatten(self):
+        children = []
+        for child in self.children:
+            if isinstance(child, Q):
+                x = child.flatten()
+                for y in x:
+                    yield y
+            else:
+                children.append(child)
+        yield self.NOT if self.negated else '', self.connector, children
+
 
 class OData:
     serializer_class: Type[BaseModel]
 
-    LOOKUPS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
-    DEFAULT_LOOKUP = 'eq'
+    OPERATORS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
+    DEFAULT_OPERATOR = 'eq'
     ANNOTATIONS = ('guid', 'date')
 
     def __new__(cls, *args, **kwargs):
@@ -179,41 +194,44 @@ class OData:
     def __init__(self):
         self.fields = self.serializer_class.model_fields
         self.select_fields: list[str] = []
-        self._filters: list[tuple[Field, str | None, Any, str]] = []
+        self._filter: None | Q = None
 
-    def filter(self, **kwargs):
+    def filter(self, *args, **kwargs) -> 'OData':
         """
-        Фильтр odata запроса.
-        Принимает параметры фильтрации - lookups в стиле Django ORM.
-        В качестве имен параметров фильтрации используйте имена полей
-        self.serializer_class.
-        Параметры фильтрации объединяются пока только по and.
-        Пример:
-            filter(Q(baz='a'), foo='b' , bar__gt=20, uid__in__guid = ['',])
+        Request filtering.
+        Example: filter(Q(a=1, b__gt), c__eq__in=[1, 2])
+        :param args: Q objects.
+        :param kwargs: Lookups.
+        :return: self
         """
-        for key, value in kwargs.items():
-            field_lookup: list[str | None] = key.split('__', maxsplit=3)
-            if len(field_lookup) == 1:
-                field_lookup.extend([self.DEFAULT_LOOKUP, None])
-            elif len(field_lookup) == 2:
-                field_lookup.append(None)
-            field, lookup, annotation = field_lookup
 
-            if field not in self.fields:
-                raise KeyError(
-                    f"Field '{field_lookup[0]}' not found. "
-                    f"Use one of {list(self.fields.keys())}"
-                )
-            self._filters.append((field, lookup, value, annotation))
-
-            if lookup not in self.LOOKUPS:
-                raise TypeError(
-                    f"Unsupported lookup {lookup}. Use one of {self.LOOKUPS}.")
-
-            if annotation is not None and annotation not in self.ANNOTATIONS:
-                raise TypeError(f"Unsupported annotation {annotation}."
-                                f" Use one of {self.ANNOTATIONS}.")
+        self._filter = Q(*args, **kwargs)
         return self
+
+
+        # for key, value in kwargs.items():
+        #     field_lookup: list[str | None] = key.split('__', maxsplit=3)
+        #     if len(field_lookup) == 1:
+        #         field_lookup.extend([self.DEFAULT_LOOKUP, None])
+        #     elif len(field_lookup) == 2:
+        #         field_lookup.append(None)
+        #     field, lookup, annotation = field_lookup
+        #
+        #     if field not in self.fields:
+        #         raise KeyError(
+        #             f"Field '{field_lookup[0]}' not found. "
+        #             f"Use one of {list(self.fields.keys())}"
+        #         )
+        #     self._filters.append((field, lookup, value, annotation))
+        #
+        #     if lookup not in self.LOOKUPS:
+        #         raise TypeError(
+        #             f"Unsupported lookup {lookup}. Use one of {self.LOOKUPS}.")
+        #
+        #     if annotation is not None and annotation not in self.ANNOTATIONS:
+        #         raise TypeError(f"Unsupported annotation {annotation}."
+        #                         f" Use one of {self.ANNOTATIONS}.")
+        # return self
 
     def build_query_params(self) -> str:
         query_params = [p for p
@@ -234,13 +252,29 @@ class OData:
 
     def build_filter(self) -> str:
         """Generates the "$filter" query parameter."""
-        conditions = []
-        for field, lookup, value, annotation in self._filters:
-            lookup_builder = self.get_lookup_builder(lookup)
-            conditions.append(lookup_builder(field, value, annotation))
-        if not conditions:
+        if self._filter is None:
             return ''
-        return '$filter=' + ' and '.join(conditions)
+        result = ''
+        children = []
+        prev_conn = None
+        for negated, connector, lookups in self._filter.flatten():
+            conditions = []
+            for lookup in lookups:
+                conditions.append(self.build_lookup(lookup))
+
+            if children and connector != prev_conn:
+                if connector == Q.AND:
+                    children = list(map(lambda x: f'({x})', children))
+                result += f' {connector} '.join(children)
+
+                children = []
+            else:
+                children.append(f' {connector} '.join(conditions))
+            prev_conn = connector
+
+        if not result:
+            return ''
+        return '$filter=' + result
 
     def annotate_value(self,
                        field: str,
@@ -256,11 +290,32 @@ class OData:
 
     """Lookups."""
 
+    def build_lookup(self, lookup: str) -> str:
+        field, operator, annotation, *_ = (
+            *lookup[0].split('__', maxsplit=3),
+            None,
+            None
+        )
+        if field not in self.fields:
+            raise KeyError(
+                f"Field '{field}' not found. "
+                f"Use one of {list(self.fields.keys())}"
+            )
+        field = field or self.fields[field].annotation
+        operator = operator or self.DEFAULT_OPERATOR
+        if operator not in self.OPERATORS:
+            raise KeyError(
+                f"Unsupported operator {operator} ({operator[0]}). "
+                f"Use one of {self.OPERATORS}."
+            )
+        return self.get_lookup_builder(operator)(field, lookup[1], annotation)
+
+
     def get_lookup_builder(self, lookup: str) -> Callable:
         if lookup == 'in':
             return self.in_builder
         return lambda field, value, annotation: \
-            (f'{self.fields[field].validation_alias} {lookup} '
+            (f'{field} {lookup} '
              f'{self.annotate_value(field, value, annotation)}')
 
     def in_builder(self,
