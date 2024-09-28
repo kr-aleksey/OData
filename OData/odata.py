@@ -16,37 +16,27 @@ class Q:
 
     arg_error_msg = 'The positional argument must be a Q object. Received {}.'
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args: 'Q', **kwargs: Any):
         """
         Creates a Q object with kwargs leaf. Combines the created
         Q object with the objects passed via positional arguments
         using &. Returns the resulting Q object.
-        q = Q(Q(a=1) | Q(b=0) , Q(c=1) , e=2) equivalent
-        q2 = Q(e=2) & (Q(a=1) | Q(b=0)) & Q(c=1)
         :param args: Q objects.
         :param kwargs: Lookups.
         """
-        if args:
-            cls.check_args_type(args)
-            child = args[0]
-            for arg in args[1:]:
-                child &= arg
-
         obj = super().__new__(cls)
         obj.children = [*kwargs.items()]
         obj.connector = Q.AND
         obj.negated = False
-        for child in args:
-            obj &= child
-        return obj
 
-    @classmethod
-    def check_args_type(cls, args: tuple) -> None:
         for arg in args:
             if not isinstance(arg, Q):
                 raise TypeError(cls.arg_error_msg.format(type(arg)))
+            obj &= arg
 
-    def __init__(self, *args, **kwargs):
+        return obj
+
+    def __init__(self, *args: 'Q', **kwargs: Any):
         if not args and not kwargs:
             raise AttributeError('No arguments given')
 
@@ -75,7 +65,6 @@ class Q:
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__}: {self}>'
 
-
     def __copy__(self):
         return self.create(children=self.children,
                            connector=self.connector,
@@ -103,7 +92,6 @@ class Q:
                 children.append(child)
         yield self.NOT if self.negated else '', self.connector, children
 
-
     def add(self, other) -> None:
         if not other.negated and (
                 self.connector == other.connector or len(other.children) == 1):
@@ -114,7 +102,6 @@ class Q:
     def combine(self, other, connector):
         if not self.children:
             return other.copy()
-
         obj = self.create(connector=connector)
         obj.add(self)
         obj.add(other)
@@ -128,12 +115,10 @@ class OData:
     DEFAULT_OPERATOR = 'eq'
     ANNOTATIONS = ('guid', 'date')
 
-    def __new__(cls, *args, **kwargs):
-        assert hasattr(cls, 'serializer_class'), \
-            f"Required attribute not defined {cls.__name__}.serializer_class'."
-        return super().__new__(cls)
-
     def __init__(self):
+        assert hasattr(self, 'serializer_class'), \
+            (f"Required attribute not defined: "
+             f"{self.__class__.__name__}.serializer_class'.")
         self.fields = self.serializer_class.model_fields
         self.select_fields: list[str] = []
         self._filter: None | Q = None
@@ -146,7 +131,6 @@ class OData:
         :param kwargs: Lookups.
         :return: self
         """
-
         self._filter = Q(*args, **kwargs)
         return self
 
@@ -201,14 +185,16 @@ class OData:
                        value: Any,
                        annotation: str | None) -> str:
         if annotation is not None:
+            if annotation not in self.ANNOTATIONS:
+                raise KeyError(
+                    f"Unknown annotation {annotation}. "
+                    f"Use one of {self.ANNOTATIONS}"
+                )
             return f"{annotation}'{value}'"
 
-        field_type = self.fields[field].annotation
-        if field_type is str:
+        if self.fields[field].annotation is str:
             return f"'{value}'"
         return str(value)
-
-    """Lookups."""
 
     def build_lookup(self, lookup: str) -> str:
         field, operator, annotation, *_ = (
@@ -229,7 +215,6 @@ class OData:
                 f"Use one of {self.OPERATORS}."
             )
         return self.get_lookup_builder(operator)(field, lookup[1], annotation)
-
 
     def get_lookup_builder(self, lookup: str) -> Callable:
         if lookup == 'in':

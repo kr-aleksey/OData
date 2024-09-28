@@ -14,12 +14,13 @@ from pydantic import BaseModel, Field
 
 class FooSerializer(BaseModel):
     a: int = Field()
-    b: int = Field()
+    b: int = Field(validation_alias='Фуу')
     c: int = Field()
     d: int = Field()
 
 class FooOdata(OData):
     serializer_class = FooSerializer
+    pass
 
 
 
@@ -39,14 +40,14 @@ def print_flatten(q):
         print(i)
     print()
 
-q1 = Q(a=1) & Q(b=2) | Q(c=3) & Q(d=4)
-q2 = Q(a=1) | Q(b=2) & Q(c=3) | Q(d=4)
+q1 = Q(a='1') & Q(b=2) | Q(c=3) & Q(d=4)
+q2 = Q(q1, a=1) | Q(b=2) & Q(c=3) | Q(d=4)
 q3 = ((Q(a=1) | Q(b=2)) & (Q(c=3) | Q(d__ne=4)))
 
 
 print_flatten(q1)
 print_flatten(q2)
 print_flatten(q3)
-q = Q(a=10, b__lt=20) | Q(c=10) & ~Q(d=20)
+q = Q(a=10, b__lt__gt=20) | Q(c=10) & ~Q(d=20)
 odata = FooOdata().filter(q)
 print(odata.build_filter())
