@@ -1,53 +1,137 @@
 from typing import Any, Callable, Type
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+
+class Q:
+    """
+    Q is a node of a tree graph. A node is a connection whose child
+    nodes are either leaf nodes or other instances of the node.
+    This code is partially based on Django code.
+    """
+
+    AND = 'and'
+    OR = 'or'
+    NOT = 'not'
+
+    arg_error_msg = 'The positional argument must be a Q object. Received {}.'
+
+    def __new__(cls, *args: 'Q', **kwargs: Any):
+        """
+        Creates a Q object with kwargs leaf. Combines the created
+        Q object with the objects passed via positional arguments
+        using &. Returns the resulting Q object.
+        :param args: Q objects.
+        :param kwargs: Lookups.
+        """
+        obj = super().__new__(cls)
+        obj.children = [*kwargs.items()]
+        obj.connector = Q.AND
+        obj.negated = False
+
+        for arg in args:
+            if not isinstance(arg, Q):
+                raise TypeError(cls.arg_error_msg.format(type(arg)))
+            obj &= arg
+
+        return obj
+
+    def __init__(self, *args: 'Q', **kwargs: Any):
+        if not args and not kwargs:
+            raise AttributeError('No arguments given')
+
+    @classmethod
+    def create(cls, children=None, connector=None, negated=False):
+        obj = cls.__new__(cls)
+        obj.children = children.copy() if children else []
+        obj.connector = connector if connector is not None else connector
+        obj.negated = negated
+        return obj
+
+    def __str__(self) -> str:
+        child_strs = []
+        for child in self.children:
+            if (self.connector == Q.AND
+                    and isinstance(child, Q)
+                    and not child.negated):
+                child_strs.append(f'({child})')
+            else:
+                child_strs.append(f'{child}')
+        result = f' {self.connector} '.join(child_strs)
+        if self.negated:
+            return f'{self.NOT} ({result})'
+        return result
+
+    def __repr__(self) -> str:
+        return f'<{self.__class__.__name__}: {self}>'
+
+    def __copy__(self):
+        return self.create(children=self.children,
+                           connector=self.connector,
+                           negated=self.negated)
+
+    copy = __copy__
+
+    def __or__(self, other):
+        return self.combine(other=other, connector=self.OR)
+
+    def __and__(self, other):
+        return self.combine(other=other, connector=self.AND)
+
+    def __invert__(self):
+        obj = self.copy()
+        obj.negated = not self.negated
+        return obj
+
+    def __iter__(self):
+        children = []
+        for child in self.children:
+            if isinstance(child, Q):
+                yield from child
+            else:
+                children.append(child)
+        yield self.NOT if self.negated else '', self.connector, children
+
+    def add(self, other) -> None:
+        if not other.negated and (
+                self.connector == other.connector or len(other.children) == 1):
+            self.children.extend(other.children)
+        else:
+            self.children.append(other)
+
+    def combine(self, other, connector):
+        if not self.children:
+            return other.copy()
+        obj = self.create(connector=connector)
+        obj.add(self)
+        obj.add(other)
+        return obj
 
 
 class OData:
     serializer_class: Type[BaseModel]
 
-    LOOKUPS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
-    DEFAULT_LOOKUP = 'eq'
-    NOTATIONS = ('guid', 'date')
-
-    def __new__(cls, *args, **kwargs):
-        assert hasattr(cls, 'serializer_class'), \
-            f"Required attribute not defined {cls.__name__}.serializer_class'."
-        return super().__new__(cls)
+    OPERATORS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
+    DEFAULT_OPERATOR = 'eq'
+    ANNOTATIONS = ('guid', 'date')
 
     def __init__(self):
+        assert hasattr(self, 'serializer_class'), \
+            (f"Required attribute not defined: "
+             f"{self.__class__.__name__}.serializer_class'.")
         self.fields = self.serializer_class.model_fields
         self.select_fields: list[str] = []
-        self._filters: list[tuple[Field, str | None, Any, str]] = []
+        self._filter: None | Q = None
 
-    def filter(self, **kwargs):
+    def filter(self, *args, **kwargs) -> 'OData':
         """
-        Фильтр odata запроса.
-        Принимает параметры фильтрации - lookups в стиле Django ORM.
-        В качестве имен параметров фильтрации используйте имена полей
-        self.serializer_class.
-        Параметры фильтрации объединяются пока только по and.
-        Пример:
-            filter(foo='Строка' , bar__gt=20, uid_1c__in__guid = ['',])
+        Request filtering.
+        Example: filter(Q(a=1, b__gt), c__eq__in=[1, 2])
+        :param args: Q objects.
+        :param kwargs: Lookups.
+        :return: self
         """
-        for key, value in kwargs.items():
-            field_lookup: list[str | None] = key.split('__', maxsplit=3)
-            if len(field_lookup) == 1:
-                field_lookup.extend([self.DEFAULT_LOOKUP, None])
-            elif len(field_lookup) == 2:
-                field_lookup.append(None)
-            field, lookup, notation = field_lookup
-
-            if field not in self.fields:
-                raise KeyError(
-                    f"Field '{field_lookup[0]}' not found. "
-                    f"Use one of {list(self.fields.keys())}"
-                )
-            self._filters.append((field, lookup, value, notation))
-
-            if lookup not in self.LOOKUPS:
-                raise TypeError(
-                    f"Unsupported lookup {lookup}. Use one of {self.LOOKUPS}.")
+        self._filter = Q(*args, **kwargs)
         return self
 
     def build_query_params(self) -> str:
@@ -69,45 +153,87 @@ class OData:
 
     def build_filter(self) -> str:
         """Generates the "$filter" query parameter."""
-        conditions = []
-        for field, lookup, value, notation in self._filters:
-            lookup_builder = self.get_lookup_builder(lookup)
-            notation_func = self.get_notation_func(notation)
-            alias = self.fields[field].validation_alias
-
-            conditions.append(lookup_builder(alias, value, notation_func))
-        if not conditions:
+        if self._filter is None:
             return ''
-        return '$filter=' + ' and '.join(conditions)
+        result = ''
+        children = []
+        prev_conn = None
+        connector = Q.AND
+        for negated, connector, lookups in self._filter:
+            conditions = []
+            for lookup in lookups:
+                conditions.append(self.build_lookup(lookup))
+            if conditions:
+                condition = f' {connector} '.join(conditions)
+                if negated:
+                    condition = f'{negated} ({condition})'
+                children.append(condition)
+            if prev_conn is not None and connector != prev_conn:
+                if connector == Q.AND:
+                    children = list(map(lambda x: f'({x})', children))
+                result += f' {connector} '.join(children)
+                children = []
+                prev_conn = None
+            else:
+                prev_conn = connector
+        if children:
+            result += f' {connector} '.join(children)
+        return result
 
-    """Lookups."""
+    def annotate_value(self,
+                       field: str,
+                       value: Any,
+                       annotation: str | None) -> str:
+        if annotation is not None:
+            if annotation not in self.ANNOTATIONS:
+                raise KeyError(
+                    f"Unknown annotation {annotation}. "
+                    f"Use one of {self.ANNOTATIONS}"
+                )
+            return f"{annotation}'{value}'"
+
+        if self.fields[field].annotation is str:
+            return f"'{value}'"
+        return str(value)
+
+    def build_lookup(self, lookup: str) -> str:
+        field, operator, annotation, *_ = (
+            *lookup[0].split('__', maxsplit=3),
+            None,
+            None
+        )
+        if field not in self.fields:
+            raise KeyError(
+                f"Field '{field}' not found. "
+                f"Use one of {list(self.fields.keys())}"
+            )
+        field = field or self.fields[field].annotation
+        operator = operator or self.DEFAULT_OPERATOR
+        if operator not in self.OPERATORS:
+            raise KeyError(
+                f"Unsupported operator {operator} ({operator[0]}). "
+                f"Use one of {self.OPERATORS}."
+            )
+        return self.get_lookup_builder(operator)(field, lookup[1], annotation)
 
     def get_lookup_builder(self, lookup: str) -> Callable:
         if lookup == 'in':
             return self.in_builder
-        return lambda field_alias, value, notation_func: \
-            f'{field_alias} {lookup} {notation_func(value)}'
+        return lambda field, value, annotation: \
+            (f'{field} {lookup} '
+             f'{self.annotate_value(field, value, annotation)}')
 
-    @staticmethod
-    def in_builder(field_alias: str,
+    def in_builder(self,
+                   field: str,
                    value: Any,
-                   notation: callable) -> str:
+                   annotation: str | None) -> str:
         """
-        :param field_alias: Field validation_alias.
+        :param field: Field name.
         :param value: Value.
-        :param notation: Notation func.
+        :param annotation: Annotation.
         Converts lookup 'in' to an Odata filter parameter.
         For example: 'foo eq value or foo_alias eq value2 ...'
         """
-        items = [f'{field_alias} eq {notation(v)}' for v in value]
+        items = [f'{field} eq {self.annotate_value(field, v, annotation)}'
+                 for v in value]
         return ' or '.join(items)
-
-    """Notations."""
-
-    def get_notation_func(self, notation: str | None) -> Callable[[Any], str]:
-        if notation is None:
-            return lambda value: str(value)
-        if notation not in self.NOTATIONS:
-            raise TypeError(f"Unsupported notation {notation}."
-                            f" Use one of {self.NOTATIONS}.")
-        return lambda value: f"{notation}'{value}'"
