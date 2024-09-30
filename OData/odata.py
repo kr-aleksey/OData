@@ -14,6 +14,10 @@ class Q:
     OR = 'or'
     NOT = 'not'
 
+    OPERATORS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
+    DEFAULT_OPERATOR = 'eq'
+    ANNOTATIONS = ('guid', 'date')
+
     arg_error_msg = 'The positional argument must be a Q object. Received {}.'
 
     def __new__(cls, *args: 'Q', **kwargs: Any):
@@ -49,18 +53,7 @@ class Q:
         return obj
 
     def __str__(self) -> str:
-        child_strs = []
-        for child in self.children:
-            if (self.connector == Q.AND
-                    and isinstance(child, Q)
-                    and not child.negated):
-                child_strs.append(f'({child})')
-            else:
-                child_strs.append(f'{child}')
-        result = f' {self.connector} '.join(child_strs)
-        if self.negated:
-            return f'{self.NOT} ({result})'
-        return result
+        return self.build_expression()
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__}: {self}>'
@@ -73,47 +66,126 @@ class Q:
     copy = __copy__
 
     def __or__(self, other):
-        return self.combine(other=other, connector=self.OR)
+        return self._combine(other=other, connector=self.OR)
 
     def __and__(self, other):
-        return self.combine(other=other, connector=self.AND)
+        return self._combine(other=other, connector=self.AND)
 
     def __invert__(self):
         obj = self.copy()
         obj.negated = not self.negated
         return obj
 
-    def __iter__(self):
-        children = []
+    def _add(self, other) -> None:
+        if self.connector != other.connector or other.negated:
+            self.children.append(other)
+        else:
+            self.children.extend(other.children)
+
+    def _combine(self, other, connector):
+        obj = self.create(connector=connector)
+        obj._add(self)
+        obj._add(other)
+        return obj
+
+    def build_expression(self,
+                         field_mapping: dict[str, str] | None = None) -> str:
+        """
+        Recursively iterates over child elements. Builds an expression
+        taking into account the priorities of the operations.
+        The field_mapping argument is used to map the field name
+        to the OData field name.
+        :param field_mapping: {field_name: validation_alias}
+        :return: Full filter expression.
+        """
+        child_expressions: list[str] = []
         for child in self.children:
             if isinstance(child, Q):
-                yield from child
+                child_expression: str = child.build_expression(field_mapping)
+                if self.connector == Q.AND and child.connector == Q.OR:
+                    child_expression: str = f'({child_expression})'
             else:
-                children.append(child)
-        yield self.NOT if self.negated else '', self.connector, children
+                child_expression: str = self._build_lookup(child,
+                                                           field_mapping)
+            child_expressions.append(child_expression)
+        expression = f' {self.connector} '.join(child_expressions)
+        if self.negated:
+            expression = f'{self.NOT} ({expression})'
+        return expression
 
-    def add(self, other) -> None:
-        if not other.negated and (
-                self.connector == other.connector or len(other.children) == 1):
-            self.children.extend(other.children)
-        else:
-            self.children.append(other)
+    def _build_lookup(self,
+                      lookup: tuple[str, Any],
+                      field_mapping: dict[str, str] | None = None) -> str:
+        """
+        Builds a lookup to a filter expression.
+        :param lookup: (key, value)
+        :param field_mapping: {field_name: validation_alias}
+        :return: Lookup expression. For example: "Name eq 'Ivanov'"
+        """
+        field, operator, annotation, *_ = (
+            *lookup[0].split('__', maxsplit=3),
+            None,
+            None
+        )
+        if field_mapping is not None:
+            if field not in field_mapping:
+                raise KeyError(
+                    f"Field '{field}' not found. "
+                    f"Use one of {list(field_mapping.keys())}"
+                )
+            field = field_mapping.get(field) or field
+        operator = operator or self.DEFAULT_OPERATOR
+        if operator not in self.OPERATORS:
+            raise KeyError(
+                f"Unsupported operator {operator} ({lookup[0]}). "
+                f"Use one of {self.OPERATORS}."
+            )
+        return self._get_lookup_builder(operator)(field, lookup[1], annotation)
 
-    def combine(self, other, connector):
-        if not self.children:
-            return other.copy()
-        obj = self.create(connector=connector)
-        obj.add(self)
-        obj.add(other)
-        return obj
+    def _get_lookup_builder(self, lookup: str) -> Callable:
+        if lookup == 'in':
+            return self._in_builder
+        return lambda field, value, annotation: \
+            f'{field} {lookup} {self._annotate_value(value, annotation)}'
+
+    def _in_builder(self,
+                    field: str,
+                    value: Any,
+                    annotation: str | None) -> str:
+        """
+        :param field: Field name.
+        :param value: Value.
+        :param annotation: Annotation.
+        Converts lookup 'in' to an Odata filter parameter.
+        For example: 'foo eq value or foo eq value2 ...'
+        """
+        items = [f'{field} eq {self._annotate_value(v, annotation)}'
+                 for v in value]
+        return ' or '.join(items)
+
+    def _annotate_value(self,
+                        value: Any,
+                        annotation: str | None) -> str:
+        """
+        :param value: Value to annotate.
+        :param annotation: Annotation ('guid', 'date', etc ).
+        :return: Annotated value. For example: guid'123'.
+        """
+        if annotation is not None:
+            if annotation not in self.ANNOTATIONS:
+                raise KeyError(
+                    f"Unknown annotation {annotation}. "
+                    f"Use one of {self.ANNOTATIONS}"
+                )
+            return f"{annotation}'{value}'"
+
+        if isinstance(value, str):
+            return f"'{value}'"
+        return str(value)
 
 
 class OData:
     serializer_class: Type[BaseModel]
-
-    OPERATORS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
-    DEFAULT_OPERATOR = 'eq'
-    ANNOTATIONS = ('guid', 'date')
 
     def __init__(self):
         assert hasattr(self, 'serializer_class'), \
@@ -149,91 +221,11 @@ class OData:
             select_fields.append(self.fields[field].validation_alias)
         if not select_fields:
             return ''
-        return '$select=' + ','.join(select_fields)
+        return '$select=' + ', '.join(select_fields)
 
     def build_filter(self) -> str:
         """Generates the "$filter" query parameter."""
         if self._filter is None:
             return ''
-        result = ''
-        children = []
-        prev_conn = None
-        connector = Q.AND
-        for negated, connector, lookups in self._filter:
-            conditions = []
-            for lookup in lookups:
-                conditions.append(self.build_lookup(lookup))
-            if conditions:
-                condition = f' {connector} '.join(conditions)
-                if negated:
-                    condition = f'{negated} ({condition})'
-                children.append(condition)
-            if prev_conn is not None and connector != prev_conn:
-                if connector == Q.AND:
-                    children = list(map(lambda x: f'({x})', children))
-                result += f' {connector} '.join(children)
-                children = []
-                prev_conn = None
-            else:
-                prev_conn = connector
-        if children:
-            result += f' {connector} '.join(children)
-        return result
-
-    def annotate_value(self,
-                       field: str,
-                       value: Any,
-                       annotation: str | None) -> str:
-        if annotation is not None:
-            if annotation not in self.ANNOTATIONS:
-                raise KeyError(
-                    f"Unknown annotation {annotation}. "
-                    f"Use one of {self.ANNOTATIONS}"
-                )
-            return f"{annotation}'{value}'"
-
-        if self.fields[field].annotation is str:
-            return f"'{value}'"
-        return str(value)
-
-    def build_lookup(self, lookup: str) -> str:
-        field, operator, annotation, *_ = (
-            *lookup[0].split('__', maxsplit=3),
-            None,
-            None
-        )
-        if field not in self.fields:
-            raise KeyError(
-                f"Field '{field}' not found. "
-                f"Use one of {list(self.fields.keys())}"
-            )
-        field = field or self.fields[field].annotation
-        operator = operator or self.DEFAULT_OPERATOR
-        if operator not in self.OPERATORS:
-            raise KeyError(
-                f"Unsupported operator {operator} ({operator[0]}). "
-                f"Use one of {self.OPERATORS}."
-            )
-        return self.get_lookup_builder(operator)(field, lookup[1], annotation)
-
-    def get_lookup_builder(self, lookup: str) -> Callable:
-        if lookup == 'in':
-            return self.in_builder
-        return lambda field, value, annotation: \
-            (f'{field} {lookup} '
-             f'{self.annotate_value(field, value, annotation)}')
-
-    def in_builder(self,
-                   field: str,
-                   value: Any,
-                   annotation: str | None) -> str:
-        """
-        :param field: Field name.
-        :param value: Value.
-        :param annotation: Annotation.
-        Converts lookup 'in' to an Odata filter parameter.
-        For example: 'foo eq value or foo_alias eq value2 ...'
-        """
-        items = [f'{field} eq {self.annotate_value(field, v, annotation)}'
-                 for v in value]
-        return ' or '.join(items)
+        fild_mapping = {f: i.validation_alias for f, i in self.fields.items()}
+        return f'$filter={self._filter.build_expression(fild_mapping)}'

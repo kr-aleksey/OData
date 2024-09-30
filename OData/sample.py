@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 class FooSerializer(BaseModel):
     a: int = Field()
     b: int = Field(validation_alias='Фуу')
-    c: int = Field()
+    c: int = Field(validation_alias='Bar')
     d: int = Field()
 
 class FooOdata(OData):
@@ -24,30 +24,12 @@ class FooOdata(OData):
 
 
 
-# q = Q(a=1) | ~Q(b=0)
-# q2 =  (Q(a=1, e=33) | Q(b=0)) & (Q(j=0) | Q(c=1)) & ~(Q(z=0) | Q(y=1))
-# for i in q2.flatten():
-#     print(i)
-# pass
 
-# q2 = (Q(a=10, b='abc') | Q(c=50)) & Q(d__in=[50, 55])
-# print(repr(q))
-# pass
-# print(q2)
-
-def print_flatten(q):
-    for i in q:
-        print(i)
-    print()
-
-q1 = Q(a='1') & Q(b=2) | Q(c=3) & Q(d=4)
-q2 = Q(q1, a=1) | Q(b=2) & Q(c=3) | Q(d=4)
-q3 = ((Q(a=1) | Q(b=2)) & (Q(c=3) | Q(d__ne=4)))
+# q = (Q(a=10) | Q(c=10)) & ~Q(d=20)
+# q = (~Q(d=20) | ~Q(c='abc')) & Q(b__eq__guid='123-321')
+# q = Q(Q(a=10))
+q = ~Q(c=10) & ~Q(d=20)
 
 
-print_flatten(q1)
-print_flatten(q2)
-print_flatten(q3)
-q = Q(a=10, b__lt__gt=20) | Q(c=10) & ~Q(d=20)
 odata = FooOdata().filter(q)
 print(odata.build_filter())
