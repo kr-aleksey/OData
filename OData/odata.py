@@ -120,7 +120,7 @@ class Q:
         Builds a lookup to a filter expression.
         :param lookup: (key, value)
         :param field_mapping: {field_name: validation_alias}
-        :return: Lookup expression. For example: "Name eq 'Ivanov'"
+        :return: Expression. For example: "Name eq 'Ivanov'"
         """
         field, operator, annotation, *_ = (
             *lookup[0].split('__', maxsplit=3),
