@@ -2,6 +2,8 @@ from typing import Any, Callable, Type
 
 from pydantic import BaseModel
 
+from OData.connection import Connection
+
 
 class Q:
     """
@@ -185,47 +187,52 @@ class Q:
 
 
 class OData:
-    serializer_class: Type[BaseModel]
+    obj_model: Type[BaseModel]
+    obj_name: str
 
-    def __init__(self):
-        assert hasattr(self, 'serializer_class'), \
+    def __init__(self, connection: Connection):
+        assert hasattr(self, 'obj_model'), \
             (f"Required attribute not defined: "
-             f"{self.__class__.__name__}.serializer_class'.")
-        self.fields = self.serializer_class.model_fields
-        self.select_fields: list[str] = []
-        self._filter: None | Q = None
+             f"{self.__class__.__name__}.obj_model'.")
+        self.connection = connection
 
-    def filter(self, *args, **kwargs) -> 'OData':
+
+    @property
+    def select(self) -> str:
+        def get_fields(model):
+            odata_fields = []
+            for field, info in model.model_fields.items():
+                field = info.validation_alias or field
+                if issubclass(info.annotation, BaseModel):
+                    nested_fields = get_fields(info.annotation)
+                    odata_fields.extend(
+                        map(lambda nested: f'{field}/{nested}', nested_fields))
+                else:
+                    odata_fields.append(field)
+            return odata_fields
+        return ', '.join(get_fields(self.obj_model))
+
+    def filter(self, *args, **kwargs):
         """
-        Request filtering.
         Example: filter(Q(a=1, b__gt), c__eq__in=[1, 2])
         :param args: Q objects.
         :param kwargs: Lookups.
         :return: self
         """
-        self._filter = Q(*args, **kwargs)
-        return self
+        fields = self.obj_model.model_fields
+        fild_mapping = {f: i.validation_alias for f, i in fields.items()}
+        filter_param = Q(*args, **kwargs).build_expression(fild_mapping)
 
-    def build_query_params(self) -> str:
-        query_params = [p for p
-                        in (self.build_select(), self.build_filter())
-                        if p]
-        if not query_params:
-            return ''
-        return f'?{'&'.join(query_params)}'
+        query_params = self.get_query_params()
+        query_params['$filter'] = filter_param
+        return self.connection.list(self.obj_name, query_params)
 
-    def build_select(self) -> str:
-        """Generates the "$select" query parameter."""
-        select_fields = []
-        for field in self.fields:
-            select_fields.append(self.fields[field].validation_alias)
-        if not select_fields:
-            return ''
-        return '$select=' + ', '.join(select_fields)
+    def get_query_params(self) -> dict[str, Any]:
+        select_param = self.select
+        query_params: dict[str, Any] = {}
+        if select_param:
+            query_params['$select'] = select_param
+        return query_params
 
-    def build_filter(self) -> str:
-        """Generates the "$filter" query parameter."""
-        if self._filter is None:
-            return ''
-        fild_mapping = {f: i.validation_alias for f, i in self.fields.items()}
-        return f'$filter={self._filter.build_expression(fild_mapping)}'
+
+
