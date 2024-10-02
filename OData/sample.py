@@ -45,8 +45,8 @@ conn = Connection('http://erp.polipak.local/', 'erp_dev', authentication)
 odata = FooOdata(connection=conn)
 guids = ['ddda9041-89a8-11ec-aa39-ac1f6bd30991',
          '4ab2c2af-8a36-11ec-aa39-ac1f6bd30991']
-q = Q(uid_1c__in__guid=guids)
-stages = odata.filter(q, status='Завершен')
+q = Q(uid_1c__in__guid=guids,status='Завершен')
+stages = odata.filter(uid_1c__in__guid=guids, status='Завершен')
 pprint(stages)
 
 # q = (Q(a=10) | Q(c=10)) & ~Q(d=20)

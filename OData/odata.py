@@ -31,11 +31,24 @@ class Q:
         :param kwargs: Lookups.
         """
         obj = super().__new__(cls)
-        obj.children = [*kwargs.items()]
+        children = []
+        q_children = []
+        for key, value in kwargs.items():
+            field, lookup, *other = (*key.split('__'), None, None)
+            if lookup == 'in':
+                in_child = cls.__new__(cls)
+                in_child.connector = Q.OR
+                in_child.negated = False
+                in_child.children = [(key, v) for v in value]
+                q_children.append(in_child)
+            else:
+                children.append((key, value))
+
+        obj.children = children
         obj.connector = Q.AND
         obj.negated = False
 
-        for arg in args:
+        for arg in *args, *q_children:
             if not isinstance(arg, Q):
                 raise TypeError(cls.arg_error_msg.format(type(arg)))
             obj &= arg
