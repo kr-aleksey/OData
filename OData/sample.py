@@ -2,16 +2,31 @@ from decimal import Decimal
 from pprint import pprint
 from typing import List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from OData.odata import ODataManager, ODataModel, Q
 from OData.connection import Connection, auth
 
 
 class ProductsModel(BaseModel):
-    uid_1c: str = Field(validation_alias='Номенклатура_Key',
+    uid_1c: str = Field(alias='Номенклатура_Key',
+                        # validation_alias='Номенклатура_Key',
+                        # alias='uid_1c',
+                        # serialization_alias='Номенклатура_Key',
                         max_length=36)
     # quantity: Decimal = Field(validation_alias='Количество')
+
+# deserialize
+ext_data = {'Номенклатура_Key': 'abc'}
+data = ProductsModel(**ext_data)
+print(data.model_dump())
+
+# serialize
+data = ProductsModel.model_construct(uid_1c='vcbv')
+print(data.model_dump(by_alias=True))
+# print()
+pass
+
 
 class StageModel(BaseModel):
     pass
@@ -21,7 +36,8 @@ class StageModel(BaseModel):
                         min_length=1,
                         max_length=200)
     status: str = Field(validation_alias='Статус',)
-    products: List[ProductsModel] = Field(alias='asd', validation_alias='ВыходныеИзделия')
+    products: List[ProductsModel] = Field(alias='asd',
+                                          validation_alias='ВыходныеИзделия')
 
 s = StageModel.model_construct()
 pass
@@ -35,6 +51,9 @@ conn = Connection('http://erp.polipak.local/',
                   'erp_dev',
                   auth.HTTPBasicAuth('pro2', 'dev'))
 stages = StageOdataModel.manager(conn).top(5).all()
+
+
+
 pass
 # class FooOdata(ODataManager):
 #      obj_model = StageModel
