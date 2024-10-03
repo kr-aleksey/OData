@@ -194,19 +194,70 @@ class Q:
         return str(value)
 
 
-class OData:
-    obj_model: Type[BaseModel]
-    obj_name: str
+class ODataModel:
+    entity_model: Type[BaseModel]
+    entity_name: str
 
-    def __init__(self, connection: Connection):
-        assert hasattr(self, 'obj_model'), \
-            (f"Required attribute not defined: "
-             f"{self.__class__.__name__}.obj_model'.")
+    _err_msg: str = "Required attribute not defined: {}."
+
+    @classmethod
+    def manager(cls, connection: Connection) -> 'ODataManager':
+        """Returns an instance of the model manager."""
+        assert hasattr(cls, 'entity_model'), (
+            cls._err_msg.format(f'{cls.__name__}.entity_model'))
+        assert hasattr(cls, 'entity_name'), (
+            cls._err_msg.format(f'{cls.__name__}.entity_name'))
+        return ODataManager(model=cls, connection=connection)
+
+
+class ODataManager:
+
+    def __init__(self, model: Type[ODataModel], connection: Connection):
+
+        self.model = model
         self.connection = connection
+        self._filter: Q | None = None
+        self._top: int | None = None
+
+    def __str__(self):
+        return f'{self.model.__name__} manager'
+
+    def top(self, n: int):
+        self._top = n
+        return self
+
+    def all(self):
+        objs: list[dict[str, Any]] = self.connection.list(
+            self.model.entity_name,
+            self.get_query_params()
+        )
+        data = []
+        for obj in objs:
+            data.append(self.model.entity_model(**obj))
+        return data
 
 
-    @property
-    def select(self) -> str:
+    def filter(self, *args, **kwargs):
+        """
+        Sets filtering conditions.
+        Example: filter(Q(a=1, b__gt), c__in=[1, 2])
+        :param args: Q objects.
+        :param kwargs: Lookups.
+        :return: self
+        """
+        q = Q(*args, **kwargs)
+        if self._filter is not None:
+            self._filter &= q
+        else:
+            self._filter = q
+        return self
+
+    def get_filter(self) -> str:
+        fields = self.model.entity_model.model_fields
+        field_mapping = {f: i.validation_alias for f, i in fields.items()}
+        return self._filter.build_expression(field_mapping)
+
+    def get_select(self) -> str:
         def get_fields(model):
             odata_fields = []
             for field, info in model.model_fields.items():
@@ -218,26 +269,14 @@ class OData:
                 else:
                     odata_fields.append(field)
             return odata_fields
-        return ', '.join(get_fields(self.obj_model))
 
-    def filter(self, *args, **kwargs):
-        """
-        Example: filter(Q(a=1, b__gt), c__eq__in=[1, 2])
-        :param args: Q objects.
-        :param kwargs: Lookups.
-        :return: self
-        """
-        fields = self.obj_model.model_fields
-        fild_mapping = {f: i.validation_alias for f, i in fields.items()}
-        filter_param = Q(*args, **kwargs).build_expression(fild_mapping)
-
-        query_params = self.get_query_params()
-        query_params['$filter'] = filter_param
-        return self.connection.list(self.obj_name, query_params)
+        return ', '.join(get_fields(self.model.entity_model))
 
     def get_query_params(self) -> dict[str, Any]:
-        select_param = self.select
         query_params: dict[str, Any] = {}
-        if select_param:
-            query_params['$select'] = select_param
+        qp_select = self.get_select()
+        if self._top is not None:
+            query_params['$top'] = self._top
+        if qp_select:
+            query_params['$select'] = qp_select
         return query_params
