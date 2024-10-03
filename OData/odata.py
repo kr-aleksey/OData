@@ -32,23 +32,18 @@ class Q:
         """
         obj = super().__new__(cls)
         children = []
-        q_children = []
         for key, value in kwargs.items():
-            field, lookup, *other = (*key.split('__'), None, None)
+            _, lookup, *_ = *key.split('__'), None
             if lookup == 'in':
-                in_child = cls.__new__(cls)
-                in_child.connector = Q.OR
-                in_child.negated = False
-                in_child.children = [(key, v) for v in value]
-                q_children.append(in_child)
+                children.append(
+                    cls.create(children=[(key, value)], connector=Q.OR))
             else:
                 children.append((key, value))
-
         obj.children = children
         obj.connector = Q.AND
         obj.negated = False
 
-        for arg in *args, *q_children:
+        for arg in args:
             if not isinstance(arg, Q):
                 raise TypeError(cls.arg_error_msg.format(type(arg)))
             obj &= arg
@@ -246,6 +241,3 @@ class OData:
         if select_param:
             query_params['$select'] = select_param
         return query_params
-
-
-

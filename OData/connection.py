@@ -129,7 +129,7 @@ class Connection:
               data: dict[str, Any],
               query_params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Updating an object by guid."""
-        response = self.request('DELETE',
+        response = self.request('PATCH',
                                 entity_name,
                                 guid=guid,
                                 data=data,
