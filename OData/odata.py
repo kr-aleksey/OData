@@ -195,7 +195,7 @@ class Q:
 
 
 class ODataModel:
-    entity_model: Type[BaseModel]
+    entity_model: BaseModel
     entity_name: str
 
     _err_msg: str = "Required attribute not defined: {}."
@@ -258,19 +258,19 @@ class ODataManager:
         return self._filter.build_expression(field_mapping)
 
     def get_select(self) -> str:
-        def get_fields(model):
-            odata_fields = []
-            for field, info in model.model_fields.items():
-                field = info.validation_alias or field
-                if issubclass(info.annotation, BaseModel):
-                    nested_fields = get_fields(info.annotation)
-                    odata_fields.extend(
-                        map(lambda nested: f'{field}/{nested}', nested_fields))
-                else:
-                    odata_fields.append(field)
-            return odata_fields
+        fields = self.model.entity_model.model_fields
+        nested_models: dict[str, BaseModel] = self.model.entity_model.nested_models
+        aliases = []
+        for field, info in fields.items():
+            alias = info.alias or field
+            if field in nested_models:
+                for nested_field, nested_info in nested_models[field].model_fields.items():
+                    nested_alias = nested_info.alias or nested_field
+                    aliases.append(f'{alias}/{nested_alias}')
+            else:
+                aliases.append(alias)
 
-        return ', '.join(get_fields(self.model.entity_model))
+        return ', '.join(aliases)
 
     def get_query_params(self) -> dict[str, Any]:
         query_params: dict[str, Any] = {}
