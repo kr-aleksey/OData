@@ -105,7 +105,7 @@ class Q:
         taking into account the priorities of the operations.
         The field_mapping argument is used to map the field name
         to the OData field name.
-        :param field_mapping: {field_name: validation_alias}
+        :param field_mapping: {field_name: alias}
         :return: Full filter expression.
         """
         child_expressions: list[str] = []
@@ -129,7 +129,7 @@ class Q:
         """
         Builds a lookup to a filter expression.
         :param lookup: (key, value)
-        :param field_mapping: {field_name: validation_alias}
+        :param field_mapping: {field_name: alias}
         :return: Expression. For example: "Name eq 'Ivanov'"
         """
         field, operator, annotation, *_ = (
@@ -254,8 +254,10 @@ class ODataManager:
 
     def get_filter(self) -> str:
         fields = self.model.entity_model.model_fields
-        field_mapping = {f: i.validation_alias for f, i in fields.items()}
-        return self._filter.build_expression(field_mapping)
+        field_mapping = {f: i.alias for f, i in fields.items()}
+        if self._filter is not None:
+            return self._filter.build_expression(field_mapping)
+        return ''
 
     def get_select(self) -> str:
         fields = self.model.entity_model.model_fields
@@ -274,9 +276,13 @@ class ODataManager:
 
     def get_query_params(self) -> dict[str, Any]:
         query_params: dict[str, Any] = {}
-        qp_select = self.get_select()
         if self._top is not None:
             query_params['$top'] = self._top
-        if qp_select:
-            query_params['$select'] = qp_select
+        select_qp = self.get_select()
+        if select_qp:
+            query_params['$select'] = select_qp
+
+        filter_qp = self.get_filter()
+        if filter_qp:
+            query_params['$filter'] = filter_qp
         return query_params
