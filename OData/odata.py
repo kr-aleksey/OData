@@ -1,8 +1,34 @@
-from typing import Any, Callable, Type
+from typing import Any, Callable, ClassVar, Optional, Type
 
 from pydantic import BaseModel
 
 from OData.connection import Connection
+
+
+class OdataModel(BaseModel):
+    """
+    Data model for serialization, deserialization and validation.
+    The nested_models attribute is used to optimize the query.
+    If nested_models is None, all fields of nested entities will
+    be requested, regardless of their presence in the nested model.
+    """
+    nested_models: ClassVar[Optional[dict[str, BaseModel]]] = None
+
+
+class OData:
+    entity_model: Type[OdataModel]
+    entity_name: str
+
+    _err_msg: str = "Required attribute not defined: {}."
+
+    @classmethod
+    def manager(cls, connection: Connection) -> 'ODataManager':
+        """Returns an instance of the model manager."""
+        assert hasattr(cls, 'entity_model'), (
+            cls._err_msg.format(f'{cls.__name__}.entity_model'))
+        assert hasattr(cls, 'entity_name'), (
+            cls._err_msg.format(f'{cls.__name__}.entity_name'))
+        return ODataManager(odata_class=cls, connection=connection)
 
 
 class Q:
@@ -76,26 +102,26 @@ class Q:
     copy = __copy__
 
     def __or__(self, other):
-        return self._combine(other=other, connector=self.OR)
+        return self.combine(other=other, connector=self.OR)
 
     def __and__(self, other):
-        return self._combine(other=other, connector=self.AND)
+        return self.combine(other=other, connector=self.AND)
 
     def __invert__(self):
         obj = self.copy()
         obj.negated = not self.negated
         return obj
 
-    def _add(self, other) -> None:
+    def add(self, other) -> None:
         if self.connector != other.connector or other.negated:
             self.children.append(other)
         else:
             self.children.extend(other.children)
 
-    def _combine(self, other, connector):
+    def combine(self, other, connector):
         obj = self.create(connector=connector)
-        obj._add(self)
-        obj._add(other)
+        obj.add(self)
+        obj.add(other)
         return obj
 
     def build_expression(self,
@@ -194,48 +220,31 @@ class Q:
         return str(value)
 
 
-class ODataModel:
-    entity_model: BaseModel
-    entity_name: str
-
-    _err_msg: str = "Required attribute not defined: {}."
-
-    @classmethod
-    def manager(cls, connection: Connection) -> 'ODataManager':
-        """Returns an instance of the model manager."""
-        assert hasattr(cls, 'entity_model'), (
-            cls._err_msg.format(f'{cls.__name__}.entity_model'))
-        assert hasattr(cls, 'entity_name'), (
-            cls._err_msg.format(f'{cls.__name__}.entity_name'))
-        return ODataManager(model=cls, connection=connection)
-
-
 class ODataManager:
 
-    def __init__(self, model: Type[ODataModel], connection: Connection):
-
-        self.model = model
+    def __init__(self, odata_class: Type[OData], connection: Connection):
+        self.odata_class = odata_class
         self.connection = connection
+        self.response_data: dict[str, Any] | list[dict[str, Any]] | None = None
         self._filter: Q | None = None
         self._top: int | None = None
 
     def __str__(self):
-        return f'{self.model.__name__} manager'
+        return f'{self.odata_class.__name__} manager'
 
     def top(self, n: int):
         self._top = n
         return self
 
     def all(self):
-        objs: list[dict[str, Any]] = self.connection.list(
-            self.model.entity_name,
+        self.response_data: list[dict[str, Any]] = self.connection.list(
+            self.odata_class.entity_name,
             self.get_query_params()
         )
-        data = []
-        for obj in objs:
-            data.append(self.model.entity_model(**obj))
-        return data
-
+        objs = []
+        for obj in self.response_data:
+            objs.append(self.odata_class.entity_model(**obj))
+        return objs
 
     def filter(self, *args, **kwargs):
         """
@@ -253,20 +262,21 @@ class ODataManager:
         return self
 
     def get_filter(self) -> str:
-        fields = self.model.entity_model.model_fields
+        fields = self.odata_class.entity_model.model_fields
         field_mapping = {f: i.alias for f, i in fields.items()}
         if self._filter is not None:
             return self._filter.build_expression(field_mapping)
         return ''
 
     def get_select(self) -> str:
-        fields = self.model.entity_model.model_fields
-        nested_models: dict[str, BaseModel] = self.model.entity_model.nested_models
+        fields = self.odata_class.entity_model.model_fields
+        nested_models = self.odata_class.entity_model.nested_models
         aliases = []
         for field, info in fields.items():
             alias = info.alias or field
-            if field in nested_models:
-                for nested_field, nested_info in nested_models[field].model_fields.items():
+            if nested_models is not None and field in nested_models:
+                for nested_field, nested_info in nested_models[
+                    field].model_fields.items():
                     nested_alias = nested_info.alias or nested_field
                     aliases.append(f'{alias}/{nested_alias}')
             else:
