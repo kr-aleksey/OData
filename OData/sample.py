@@ -56,16 +56,18 @@ with Connection('erp.polipak.local',
                 'http',
                 auth.HTTPBasicAuth('pro2', 'dev')) as conn:
     manager = StageOdata.manager(conn)
-    stages: list[BaseModel] = (manager
-                               .filter(uid_1c__in__guid=guids, status='Начат')
-                               .top(5)
-                               .all())
-    pprint(stages)
-    stage = manager.get(guid='ce52f328-3f1d-11ed-aa45-ac1f6bd30990')
-    pprint(stage)
-    stage.number = 'ПП00-5729.3.1.55'
-    stage = manager.update(stage.uid_1c, stage)
-    pprint(stage)
+    # stages: list[BaseModel] = (manager
+    #                            .filter(uid_1c__in__guid=guids, status='Начат')
+    #                            .top(5)
+    #                            .all())
+    # pprint(stages)
+    # stage = manager.get(guid='ce52f328-3f1d-11ed-aa45-ac1f6bd30990')
+    # pprint(stage)
+    # stage.number = 'ПП00-5729.3.1.5'
+    # stage = manager.update(stage.uid_1c, stage)
+    # pprint(stage)
+    stage = manager.filter(number='ПП00-4558.3.1').all()
+    manager.post_document(guid=stage[0].uid_1c)
 
 
 # conn = Connection('erp.polipak.local',

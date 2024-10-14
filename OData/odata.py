@@ -21,23 +21,6 @@ class OdataModel(BaseModel):
     nested_models: ClassVar[Optional[dict[str, BaseModel]]] = None
 
 
-class OData:
-    database: str
-    entity_model: Type[OdataModel]
-    entity_name: str
-
-    _err_msg: str = "Required attribute not defined: {}."
-
-    @classmethod
-    def manager(cls, connection: Connection) -> 'ODataManager':
-        """Returns an instance of the model manager."""
-        assert hasattr(cls, 'entity_model'), (
-            cls._err_msg.format(f'{cls.__name__}.entity_model'))
-        assert hasattr(cls, 'entity_name'), (
-            cls._err_msg.format(f'{cls.__name__}.entity_name'))
-        return ODataManager(odata_class=cls, connection=connection)
-
-
 class Q:
     """
     Q is a node of a tree graph. A node is a connection whose child
@@ -227,8 +210,24 @@ class Q:
         return str(value)
 
 
-class ODataManager:
+class OData:
+    database: str
+    entity_model: Type[OdataModel]
+    entity_name: str
 
+    _err_msg: str = "Required attribute not defined: {}."
+
+    @classmethod
+    def manager(cls, connection: Connection) -> 'ODataManager':
+        """Returns an instance of the odata manager."""
+        assert hasattr(cls, 'entity_model'), (
+            cls._err_msg.format(f'{cls.__name__}.entity_model'))
+        assert hasattr(cls, 'entity_name'), (
+            cls._err_msg.format(f'{cls.__name__}.entity_name'))
+        return ODataManager(odata_class=cls, connection=connection)
+
+
+class ODataManager:
     odata_path = 'odata/standard.odata'
     odata_list_json_key = 'value'
 
@@ -237,12 +236,47 @@ class ODataManager:
         self.connection = connection
         self.request_data: dict[str, Any] | list[dict[str, Any]] | None = None
         self.response: Response | None = None
-        self.validation_errors: dict[int, ValidationError] = {}
+        self.validation_errors: list[ValidationError] = []
         self._filter: Q | None = None
         self._top: int | None = None
 
     def __str__(self):
         return f'{self.odata_class.__name__} manager'
+
+    def _check_response(self, ok_status: int) -> None:
+        if self.response.status_code != ok_status:
+            raise ResponseError(self.response.status_code,
+                                self.response.reason,
+                                self.response.text)
+
+    def _validate(self,
+                  data: list[dict[str, Any]] | dict[str, Any],
+                  ignore_invalid: bool = False
+                  ) -> list[OdataModel] | OdataModel:
+        self.validation_errors = []
+        if isinstance(data, list):
+            validated_objs = []
+            for obj in data:
+                validated_objs.append(self._validate_obj(obj, ignore_invalid))
+            return validated_objs
+        return self._validate_obj(data, ignore_invalid)
+
+    def _validate_obj(self,
+                      obj: dict[str, Any],
+                      ignore_invalid: bool) -> OdataModel:
+        try:
+            return self.odata_class.entity_model.model_validate(obj)
+        except ValidationError as e:
+            self.validation_errors.append(e)
+            if not ignore_invalid:
+                raise e
+
+    def _json(self) -> dict[str, Any]:
+        try:
+            data = self.response.json()
+        except r_exceptions.JSONDecodeError as e:
+            raise ODataError(e)
+        return data
 
     @property
     def relative_url(self) -> str:
@@ -251,7 +285,7 @@ class ODataManager:
                 f'/{self.odata_class.entity_name}')
 
     def get_canonical_url(self, guid: str):
-        return f"{self.relative_url}(guid'{guid}'){self.get_query_params()}"
+        return f"{self.relative_url}(guid'{guid}')"
 
     def all(self, ignor_invalid: bool = False) -> list[OdataModel]:
         """Returns validated instances of the OdataModel class.
@@ -261,43 +295,28 @@ class ODataManager:
         self.request_data = None
         self.response = self.connection.request(
             method='GET',
-            relative_url= self.relative_url + self.get_query_params()
+            relative_url=self.relative_url,
+            query_params=self.get_query_params()
         )
-
+        self._check_response(HTTPStatus.OK)
         try:
-            objs: list[dict[str, Any]] = self.check_response(
-                HTTPStatus.OK)[self.odata_list_json_key]
-            validated_objs = []
+            data: list[dict[str, Any]] = self._json()[self.odata_list_json_key]
         except KeyError:
             raise ODataError(
                 f'Response json has no key {self.odata_list_json_key}'
             )
-
-        self.validation_errors = {}
-        for i, obj in enumerate(objs):
-            try:
-                validated_objs.append(self.odata_class.entity_model(**obj))
-            except ValidationError as e:
-                self.validation_errors[i] = e
-                if not ignor_invalid:
-                    raise e
-        return validated_objs
+        return self._validate(data, ignor_invalid)
 
     def get(self, guid: str) -> OdataModel:
         """Get an entity by guid."""
         self.request_data = None
         self.response = self.connection.request(
             method='GET',
-            relative_url=self.get_canonical_url(guid)
+            relative_url=self.get_canonical_url(guid),
+            query_params=self.get_query_params()
         )
-        data = self.check_response(HTTPStatus.OK)
-        self.validation_errors = {}
-        try:
-            return self.odata_class.entity_model.model_validate(data)
-        except ValidationError as e:
-            self.validation_errors[0] = e
-            raise e
-
+        self._check_response(HTTPStatus.OK)
+        return self._validate(self._json())
 
     def update(self,
                guid: str,
@@ -311,23 +330,32 @@ class ODataManager:
         self.response = self.connection.request(
             method='PATCH',
             relative_url=self.get_canonical_url(guid),
+            query_params=self.get_query_params(),
             data=self.request_data
         )
-        data = self.check_response(HTTPStatus.OK)
-        try:
-            return self.odata_class.entity_model.model_validate(data)
-        except ValidationError as e:
-            self.validation_errors[0] = e
-            raise e
+        self._check_response(HTTPStatus.OK)
+        return self._validate(self._json())
 
-    # def make_posted(self,
-    #                 guid: str,
-    #                 operational_mode: bool = False) -> OdataModel:
-    #
-    #     self.response_data: dict[str, Any] = self.connection.post(
-    #         entity_name=self.odata_class.entity_name,
-    #         guid=guid,
-    #     )
+    def post_document(self,
+                      guid: str,
+                      operational_mode: bool = False) -> None:
+        self.response = self.connection.request(
+            method='POST',
+            relative_url=f'{self.get_canonical_url(guid)}/Post',
+            query_params={
+                'PostingModeOperational': str(operational_mode).lower()
+            },
+            data=self.request_data
+        )
+        self._check_response(HTTPStatus.OK)
+
+    def unpost_document(self, guid: str) -> None:
+        self.response = self.connection.request(
+            method='POST',
+            relative_url=f'{self.get_canonical_url(guid)}/Unpost',
+            data=self.request_data
+        )
+        self._check_response(HTTPStatus.OK)
 
     def filter(self, *args, **kwargs):
         """
@@ -371,7 +399,7 @@ class ODataManager:
 
         return ', '.join(aliases)
 
-    def get_query_params(self) -> str:
+    def get_query_params(self) -> dict[str, Any]:
         """Returns encoded query parameters."""
         query_params: dict[str, Any] = {}
 
@@ -386,17 +414,4 @@ class ODataManager:
         if filter_qp:
             query_params['$filter'] = filter_qp
 
-        if not query_params:
-            return ''
-        return f'?{urlencode(query_params, quote_via=quote)}'
-
-    def check_response(self, ok_status: int) -> dict[str, Any]:
-        if self.response.status_code != ok_status:
-            raise ResponseError(self.response.status_code,
-                                self.response.reason,
-                                self.response.text)
-        try:
-            data = self.response.json()
-        except r_exceptions.JSONDecodeError as e:
-            raise ODataError(e)
-        return data
+        return query_params
