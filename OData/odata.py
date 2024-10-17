@@ -7,7 +7,7 @@ from pydantic import BaseModel, ValidationError
 from requests import Response
 
 from OData.exeptions import ODataError, ResponseError
-from OData.http import Connection
+from OData.http import Connection, Request
 
 type_repr = {
     bool: lambda v: str(v).lower(),
@@ -237,7 +237,8 @@ class ODataManager:
     def __init__(self, odata_class: Type[OData], connection: Connection):
         self.odata_class = odata_class
         self.connection = connection
-        self.request_data: dict[str, Any] | list[dict[str, Any]] | None = None
+        # self.request_data: dict[str, Any] | list[dict[str, Any]] | None = None
+        self.request: Request | None = None
         self.response: Response | None = None
         self.validation_errors: list[ValidationError] = []
         self._expand: Iterable[str] | None = None
@@ -296,16 +297,15 @@ class ODataManager:
         If ignor_invalid = True, invalid objects will be skipped,
         errors will be accumulated in self.validation_errors.
         Otherwise, a pydantic.ValidationError exception will be raised."""
-        self.request_data = None
-        self.response = self.connection.request(
-            method='GET',
-            relative_url=self.get_url(),
-            query_params=self.prepare_qps(self.qp_select,
-                                          self.qp_expand,
-                                          self.qp_top,
-                                          self.qp_skip,
-                                          self.qp_filter)
-        )
+        self.request = Request(method='GET',
+                               relative_url=self.get_url(),
+                               query_params=self.prepare_qps(
+                                   self.qp_select,
+                                   self.qp_expand,
+                                   self.qp_top,
+                                   self.qp_skip,
+                                   self.qp_filter))
+        self.response = self.connection.send_request(self.request)
         self._check_response(HTTPStatus.OK)
         try:
             data: list[dict[str, Any]] = self._json()[self.odata_list_json_key]
@@ -317,12 +317,13 @@ class ODataManager:
 
     def get(self, guid: str) -> OdataModel:
         """Get an entity by guid."""
-        self.request_data = None
-        self.response = self.connection.request(
-            method='GET',
-            relative_url=self.get_canonical_url(guid),
-            query_params=self.prepare_qps(self.qp_select, self.qp_expand)
-        )
+        self.request = Request(method='GET',
+                               relative_url=self.get_canonical_url(guid),
+                               query_params=self.prepare_qps(
+                                   self.qp_select,
+                                   self.qp_expand)
+                               )
+        self.response = self.connection.send_request(self.request)
         self._check_response(HTTPStatus.OK)
         return self._validate(self._json())
 
@@ -331,37 +332,37 @@ class ODataManager:
                data: OdataModel | dict[str, Any]) -> OdataModel:
         """Updates (patch) an entity by guid."""
         if isinstance(data, OdataModel):
-            self.request_data = data.model_dump(by_alias=True)
+            request_data = data.model_dump(by_alias=True)
         else:
-            self.request_data = data
-
-        self.response = self.connection.request(
-            method='PATCH',
-            relative_url=self.get_canonical_url(guid),
-            data=self.request_data
-        )
+            request_data = data
+        self.request = Request(method='PATCH',
+                               relative_url=self.get_canonical_url(guid),
+                               data=request_data)
+        self.response = self.connection.send_request(self.request)
         self._check_response(HTTPStatus.OK)
         return self._validate(self._json())
 
     def post_document(self,
                       guid: str,
                       operational_mode: bool = False) -> None:
-        self.response = self.connection.request(
+        self.request = Request(
             method='POST',
             relative_url=f'{self.get_canonical_url(guid)}/Post',
             query_params={
-                'PostingModeOperational': type_repr[bool](operational_mode)
-            },
-            data=self.request_data
+                'PostingModeOperational':
+                    type_repr[bool](
+                        operational_mode)
+            }
         )
+        self.response = self.connection.send_request(self.request)
         self._check_response(HTTPStatus.OK)
 
     def unpost_document(self, guid: str) -> None:
-        self.response = self.connection.request(
+        self.request = Request(
             method='POST',
-            relative_url=f'{self.get_canonical_url(guid)}/Unpost',
-            data=self.request_data
+            relative_url=f'{self.get_canonical_url(guid)}/Unpost'
         )
+        self.response = self.connection.send_request(self.request)
         self._check_response(HTTPStatus.OK)
 
     """Query parameters."""

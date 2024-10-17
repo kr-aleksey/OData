@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -7,6 +8,12 @@ import requests.exceptions as r_exceptions
 
 from OData.exeptions import ClientConnectionError
 
+@dataclass
+class Request:
+    method: str
+    relative_url: str
+    query_params: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
 
 class Connection:
 
@@ -25,14 +32,14 @@ class Connection:
             'Accept': 'application/json',
             # 'Connection': 'keep-alive'
         }
-        self.session = None
+        self._session = None
 
     def __enter__(self) -> 'Connection':
-        self.session = self._create_session()
+        self._session = self._create_session()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.session.close()
+        self._session.close()
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
@@ -48,17 +55,16 @@ class Connection:
             url = f'{url}?{urlencode(query_params, quote_via=quote)}'
         return url
 
-    def request(self,
-                method: str,
-                relative_url: str,
-                query_params: dict[str, Any] | None = None,
-                data: dict[str, Any] | None = None) -> requests.Response:
-        if self.session is None:
+    def send_request(self,
+                     request: Request) -> requests.Response:
+        if self._session is None:
             session = self._create_session()
         else:
-            session = self.session
-        url = self.get_url(relative_url, query_params)
-        req = requests.Request(method=method, url=url, json=data)
+            session = self._session
+        url = self.get_url(request.relative_url, request.query_params)
+        req = requests.Request(method=request.method,
+                               url=url,
+                               json=request.data)
         prepared = session.prepare_request(req)
         try:
             response: requests.Response = session.send(
@@ -68,6 +74,6 @@ class Connection:
         except (r_exceptions.ConnectionError, r_exceptions.Timeout):
             raise ClientConnectionError
         finally:
-            if self.session is None:
+            if self._session is None:
                 session.close()
         return response
