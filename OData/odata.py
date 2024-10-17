@@ -1,14 +1,19 @@
+from datetime import datetime
 from http import HTTPStatus
-from typing import Any, Callable, ClassVar, Optional, Type
-from urllib.parse import quote, urlencode
+from typing import Any, Callable, ClassVar, Iterable, Optional, Type
 
-import requests
 import requests.exceptions as r_exceptions
 from pydantic import BaseModel, ValidationError
 from requests import Response
 
 from OData.exeptions import ODataError, ResponseError
 from OData.http import Connection
+
+type_repr = {
+    bool: lambda v: str(v).lower(),
+    str: lambda v: f"'{v}'",
+    datetime: lambda v: "datetime'{}'".format(v.isoformat('T', 'seconds')),
+}
 
 
 class OdataModel(BaseModel):
@@ -27,16 +32,14 @@ class Q:
     nodes are either leaf nodes or other instances of the node.
     This code is partially based on Django code.
     """
-
     AND = 'and'
     OR = 'or'
     NOT = 'not'
 
-    OPERATORS = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
-    DEFAULT_OPERATOR = 'eq'
-    ANNOTATIONS = ('guid', 'date')
-
-    arg_error_msg = 'The positional argument must be a Q object. Received {}.'
+    _operators = ('eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in')
+    _default_operator = 'eq'
+    _annotations = ('guid', 'datetime')
+    _arg_error_msg = 'The positional argument must be a Q object. Received {}.'
 
     def __new__(cls, *args: 'Q', **kwargs: Any):
         """
@@ -61,7 +64,7 @@ class Q:
 
         for arg in args:
             if not isinstance(arg, Q):
-                raise TypeError(cls.arg_error_msg.format(type(arg)))
+                raise TypeError(cls._arg_error_msg.format(type(arg)))
             obj &= arg
 
         return obj
@@ -159,12 +162,12 @@ class Q:
                     f"Field '{field}' not found. "
                     f"Use one of {list(field_mapping.keys())}"
                 )
-            field = field_mapping.get(field) or field
-        operator = operator or self.DEFAULT_OPERATOR
-        if operator not in self.OPERATORS:
+            field = field_mapping[field]
+        operator = operator or self._default_operator
+        if operator not in self._operators:
             raise KeyError(
                 f"Unsupported operator {operator} ({lookup[0]}). "
-                f"Use one of {self.OPERATORS}."
+                f"Use one of {self._operators}."
             )
         return self._get_lookup_builder(operator)(field, lookup[1], annotation)
 
@@ -198,15 +201,15 @@ class Q:
         :return: Annotated value. For example: guid'123'.
         """
         if annotation is not None:
-            if annotation not in self.ANNOTATIONS:
+            if annotation not in self._annotations:
                 raise KeyError(
                     f"Unknown annotation {annotation}. "
-                    f"Use one of {self.ANNOTATIONS}"
+                    f"Use one of {self._annotations}"
                 )
             return f"{annotation}'{value}'"
 
-        if isinstance(value, str):
-            return f"'{value}'"
+        if type(value) in type_repr:
+            return type_repr[type(value)](value)
         return str(value)
 
 
@@ -237,7 +240,9 @@ class ODataManager:
         self.request_data: dict[str, Any] | list[dict[str, Any]] | None = None
         self.response: Response | None = None
         self.validation_errors: list[ValidationError] = []
+        self._expand: Iterable[str] | None = None
         self._filter: Q | None = None
+        self._skip: int | None = None
         self._top: int | None = None
 
     def __str__(self):
@@ -278,14 +283,13 @@ class ODataManager:
             raise ODataError(e)
         return data
 
-    @property
-    def relative_url(self) -> str:
+    def get_url(self) -> str:
         return (f'{self.odata_class.database}'
                 f'/{self.odata_path}'
                 f'/{self.odata_class.entity_name}')
 
-    def get_canonical_url(self, guid: str):
-        return f"{self.relative_url}(guid'{guid}')"
+    def get_canonical_url(self, guid: str) -> str:
+        return f"{self.get_url()}(guid'{guid}')"
 
     def all(self, ignor_invalid: bool = False) -> list[OdataModel]:
         """Returns validated instances of the OdataModel class.
@@ -295,8 +299,12 @@ class ODataManager:
         self.request_data = None
         self.response = self.connection.request(
             method='GET',
-            relative_url=self.relative_url,
-            query_params=self.get_query_params()
+            relative_url=self.get_url(),
+            query_params=self.prepare_qps(self.qp_select,
+                                          self.qp_expand,
+                                          self.qp_top,
+                                          self.qp_skip,
+                                          self.qp_filter)
         )
         self._check_response(HTTPStatus.OK)
         try:
@@ -313,7 +321,7 @@ class ODataManager:
         self.response = self.connection.request(
             method='GET',
             relative_url=self.get_canonical_url(guid),
-            query_params=self.get_query_params()
+            query_params=self.prepare_qps(self.qp_select, self.qp_expand)
         )
         self._check_response(HTTPStatus.OK)
         return self._validate(self._json())
@@ -330,7 +338,6 @@ class ODataManager:
         self.response = self.connection.request(
             method='PATCH',
             relative_url=self.get_canonical_url(guid),
-            query_params=self.get_query_params(),
             data=self.request_data
         )
         self._check_response(HTTPStatus.OK)
@@ -343,7 +350,7 @@ class ODataManager:
             method='POST',
             relative_url=f'{self.get_canonical_url(guid)}/Post',
             query_params={
-                'PostingModeOperational': str(operational_mode).lower()
+                'PostingModeOperational': type_repr[bool](operational_mode)
             },
             data=self.request_data
         )
@@ -357,7 +364,59 @@ class ODataManager:
         )
         self._check_response(HTTPStatus.OK)
 
-    def filter(self, *args, **kwargs):
+    """Query parameters."""
+
+    @property
+    def qp_select(self) -> tuple[str, str | None]:
+        qp = '$select'
+        if self._filter is None:
+            return qp, None
+        fields = self.odata_class.entity_model.model_fields
+        nested_models = self.odata_class.entity_model.nested_models
+        aliases = []
+        for field, info in fields.items():
+            alias = info.alias or field
+            if nested_models is not None and field in nested_models:
+                for nested_field, nested_info in nested_models[
+                    field].model_fields.items():
+                    nested_alias = nested_info.alias or nested_field
+                    aliases.append(f'{alias}/{nested_alias}')
+            else:
+                aliases.append(alias)
+        return qp, ', '.join(aliases)
+
+    @property
+    def qp_expand(self) -> tuple[str, str | None]:
+        qp = '$expand'
+        if self._expand is None:
+            return qp, None
+        fields = self.odata_class.entity_model.model_fields
+        aliases = []
+        for field_name in self._expand:
+            aliases.append(fields[field_name].alias or field_name)
+        return '$expand', ', '.join(aliases)
+
+    def expand(self, fields: Iterable[str]) -> 'ODataManager':
+        nested_models = self.odata_class.entity_model.nested_models
+        for field_name in fields:
+            if field_name not in nested_models:
+                raise ValueError(
+                    f"Nested model '{field_name}' not found. "
+                    f"Use one of {list(nested_models.keys())}"
+                )
+        self._expand = fields
+        return self
+
+    @property
+    def qp_filter(self) -> tuple[str, str | None]:
+        qp = '$filter'
+        if self._filter is None:
+            return qp, None
+        fields = self.odata_class.entity_model.model_fields
+        field_mapping = {f: i.alias or f for f, i in fields.items()}
+        return qp, self._filter.build_expression(field_mapping)
+
+    def filter(self, *args, **kwargs) -> 'ODataManager':
         """
         Sets filtering conditions.
         Example: filter(Q(a=1, b__gt), c__in=[1, 2])
@@ -372,46 +431,26 @@ class ODataManager:
             self._filter = q
         return self
 
-    def top(self, n: int):
+    @property
+    def qp_skip(self) -> tuple[str, str | None]:
+        return '$skip', self._skip
+
+    def skip(self, n: int) -> 'ODataManager':
+        self._skip = n
+        return self
+
+    @property
+    def qp_top(self) -> tuple[str, str | None]:
+        return '$top', self._top
+
+    def top(self, n: int) -> 'ODataManager':
         self._top = n
         return self
 
-    def get_filter(self) -> str:
-        fields = self.odata_class.entity_model.model_fields
-        field_mapping = {f: i.alias for f, i in fields.items()}
-        if self._filter is not None:
-            return self._filter.build_expression(field_mapping)
-        return ''
-
-    def get_select(self) -> str:
-        fields = self.odata_class.entity_model.model_fields
-        nested_models = self.odata_class.entity_model.nested_models
-        aliases = []
-        for field, info in fields.items():
-            alias = info.alias or field
-            if nested_models is not None and field in nested_models:
-                for nested_field, nested_info in nested_models[
-                    field].model_fields.items():
-                    nested_alias = nested_info.alias or nested_field
-                    aliases.append(f'{alias}/{nested_alias}')
-            else:
-                aliases.append(alias)
-
-        return ', '.join(aliases)
-
-    def get_query_params(self) -> dict[str, Any]:
-        """Returns encoded query parameters."""
-        query_params: dict[str, Any] = {}
-
-        if self._top is not None:
-            query_params['$top'] = self._top
-
-        select_qp = self.get_select()
-        if select_qp:
-            query_params['$select'] = select_qp
-
-        filter_qp = self.get_filter()
-        if filter_qp:
-            query_params['$filter'] = filter_qp
-
-        return query_params
+    @staticmethod
+    def prepare_qps(*args: tuple[str, str]) -> dict[str, Any]:
+        qps = {}
+        for qp, val in args:
+            if val is not None:
+                qps[qp] = val
+        return qps
