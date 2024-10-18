@@ -1,29 +1,20 @@
 from datetime import datetime
 from http import HTTPStatus
-from typing import Any, Callable, ClassVar, Iterable, Optional, Type
+from typing import Any, Callable, Iterable, Type
 
 import requests.exceptions as r_exceptions
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from requests import Response
 
-from OData.exeptions import ODataError, ResponseError
-from OData.http import Connection, Request
+from OData1C.exeptions import ODataError, ResponseError
+from OData1C.http import Connection, Request
+from OData1C.models import OdataModel
 
 type_repr = {
     bool: lambda v: str(v).lower(),
     str: lambda v: f"'{v}'",
     datetime: lambda v: "datetime'{}'".format(v.isoformat('T', 'seconds')),
 }
-
-
-class OdataModel(BaseModel):
-    """
-    Data model for serialization, deserialization and validation.
-    The nested_models attribute is used to optimize the query.
-    If nested_models is None, all fields of nested entities will
-    be requested, regardless of their presence in the nested model.
-    """
-    nested_models: ClassVar[Optional[dict[str, BaseModel]]] = None
 
 
 class Q:
@@ -237,7 +228,6 @@ class ODataManager:
     def __init__(self, odata_class: Type[OData], connection: Connection):
         self.odata_class = odata_class
         self.connection = connection
-        # self.request_data: dict[str, Any] | list[dict[str, Any]] | None = None
         self.request: Request | None = None
         self.response: Response | None = None
         self.validation_errors: list[ValidationError] = []
@@ -397,14 +387,16 @@ class ODataManager:
             aliases.append(fields[field_name].alias or field_name)
         return '$expand', ', '.join(aliases)
 
-    def expand(self, fields: Iterable[str]) -> 'ODataManager':
+    def expand(self, *args: str) -> 'ODataManager':
         nested_models = self.odata_class.entity_model.nested_models
-        for field_name in fields:
+        fields = []
+        for field_name in args:
             if field_name not in nested_models:
                 raise ValueError(
                     f"Nested model '{field_name}' not found. "
                     f"Use one of {list(nested_models.keys())}"
                 )
+            fields.append(field_name)
         self._expand = fields
         return self
 
