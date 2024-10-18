@@ -17,9 +17,9 @@ Requests >= 2.32
 Использование
 
 ```python
-from OData1C.http import Connection, auth
-from OData1C.models import OdataModel
-from OData1C.odata import OData
+from src.http import Connection, auth
+from src.models import OdataModel
+from src.odata import OData
 from pydantic import Field, UUID1
 
 
