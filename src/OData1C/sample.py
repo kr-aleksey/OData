@@ -4,9 +4,9 @@ from pprint import pprint
 
 from pydantic import Field, UUID1, field_serializer
 
-from src.http import Connection, auth
-from src.models import OdataModel
-from src.odata import OData
+from OData1C.http import Connection, auth
+from OData1C.models import OdataModel
+from OData1C.odata import OData
 
 """
 Пример 1

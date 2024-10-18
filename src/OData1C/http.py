@@ -6,7 +6,7 @@ import requests
 import requests.auth as auth
 import requests.exceptions as r_exceptions
 
-from src.exeptions import ClientConnectionError
+from OData1C.exeptions import ClientConnectionError
 
 @dataclass
 class Request:

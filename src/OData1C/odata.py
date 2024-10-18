@@ -6,9 +6,9 @@ import requests.exceptions as r_exceptions
 from pydantic import ValidationError
 from requests import Response
 
-from src.exeptions import ODataError, ResponseError
-from src.http import Connection, Request
-from src.models import OdataModel
+from OData1C.exeptions import ODataError, ResponseError
+from OData1C.http import Connection, Request
+from OData1C.models import OdataModel
 
 type_repr = {
     bool: lambda v: str(v).lower(),
